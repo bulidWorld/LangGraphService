@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<database name="k8s_ops_agent" source="db/001_故障排查业务数据定义.xml" dialect="postgresql">
+    <tables>
+        <table name="incident_runs" comment="Kubernetes 故障排查会话，与 LangGraph thread 关联">
+            <columns>
+                <column name="id" type="integer" nullable="false" identity="true" comment="自增主键" />
+                <column name="thread_id" type="varchar(128)" nullable="false" comment="LangGraph thread 标识" />
+                <column name="cluster_name" type="varchar(255)" nullable="true" />
+                <column name="namespace" type="varchar(255)" nullable="true" />
+                <column name="workload_name" type="varchar(255)" nullable="true" />
+                <column name="status" type="varchar(32)" nullable="false" default="'investigating'" comment="状态：investigating、awaiting_approval、completed、failed" />
+                <column name="summary" type="text" nullable="true" />
+                <column name="started_at" type="timestamptz" nullable="false" default="CURRENT_TIMESTAMP" />
+                <column name="completed_at" type="timestamptz" nullable="true" />
+                <column name="created_at" type="timestamptz" nullable="false" default="CURRENT_TIMESTAMP" />
+                <column name="updated_at" type="timestamptz" nullable="false" default="CURRENT_TIMESTAMP" />
+            </columns>
+            <constraints>
+                <primary-key name="pk_incident_runs" columns="id" />
+                <unique name="uq_incident_runs_thread_id" columns="thread_id" />
+            </constraints>
+            <indexes>
+                <index name="idx_incident_runs_status_started" method="btree">
+                    <column name="status" />
+                    <column name="started_at" order="DESC" />
+                </index>
+            </indexes>
+        </table>
+        <table name="approval_requests" comment="人工审核修复建议；本服务不执行获批操作">
+            <columns>
+                <column name="id" type="integer" nullable="false" identity="true" comment="自增主键" />
+                <column name="incident_run_id" type="integer" nullable="false" ref-table="incident_runs" ref-col="id" />
+                <column name="request_id" type="varchar(64)" nullable="true" comment="版本化审批请求唯一标识" />
+                <column name="thread_id" type="varchar(128)" nullable="true" comment="LangGraph thread 标识" />
+                <column name="run_id" type="varchar(128)" nullable="true" comment="发起审批的运行标识" />
+                <column name="action" type="varchar(64)" nullable="false" comment="操作类型：business_fix 或 restart_container" />
+                <column name="rationale" type="text" nullable="false" />
+                <column name="change_plan" type="text" nullable="false" />
+                <column name="evidence" type="text" nullable="false" />
+                <column name="request_payload" type="jsonb" nullable="true" comment="版本化审批请求与表单定义" />
+                <column name="status" type="varchar(32)" nullable="false" default="'pending'" comment="状态：pending、approved、rejected、cancelled" />
+                <column name="decision" type="jsonb" nullable="true" />
+                <column name="reviewer" type="varchar(255)" nullable="true" comment="由认证上下文确定的审核人" />
+                <column name="resume_run_id" type="varchar(128)" nullable="true" comment="已占用该审批恢复权的 AG-UI run 标识" />
+                <column name="requested_at" type="timestamptz" nullable="false" default="CURRENT_TIMESTAMP" />
+                <column name="decided_at" type="timestamptz" nullable="true" />
+            </columns>
+            <constraints>
+                <primary-key name="pk_approval_requests" columns="id" />
+                <unique name="uq_approval_requests_request_id" columns="request_id" />
+            </constraints>
+            <indexes>
+                <index name="idx_approval_requests_run_status" method="btree">
+                    <column name="incident_run_id" />
+                    <column name="status" />
+                    <column name="requested_at" order="DESC" />
+                </index>
+            </indexes>
+        </table>
+    </tables>
+</database>

@@ -1,0 +1,9 @@
+{
+  "operator-agent-service": {
+    "transport": "streamable_http",
+    "url": "http://operator-agent-service.monitoring.svc.cluster.local/api/mcp",
+    "headers": {
+      "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
+    }
+  }
+}

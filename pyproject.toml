@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-k8s-ops-agent"
+version = "0.1.0"
+description = "LangGraph agent for Kubernetes incident investigation"
+requires-python = ">=3.11"
+dependencies = [
+  "ag-ui-langgraph[fastapi]>=0.0.47",
+  "ag-ui-protocol>=1.0.0",
+  "fastapi>=0.115.0",
+  "langchain>=1.2.0",
+  "langchain-core>=1.2.0",
+  "langchain-mcp-adapters>=0.3.0",
+  "langchain-openai>=1.1.0",
+  "langgraph>=0.6.0",
+  "langgraph-checkpoint-postgres>=2.0.0",
+  "langfuse>=3.0.0",
+  "tiktoken>=0.7.0",
+  "psycopg[binary,pool]>=3.2.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+db = ["sqlalchemy[asyncio]>=2.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["k8s_ops_agent*"]
+
+[tool.setuptools.package-dir]
+"" = "src"

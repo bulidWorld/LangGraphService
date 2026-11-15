@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langgraph-k8s-ops-agent-config
+data:
+  # MCP 配置按服务名称组织，可在同一个 JSON 对象中声明多个服务。
+  mcp_server.json: |
+    {
+      "operator-agent-service": {
+        "transport": "streamable_http",
+        "url": "http://operator-agent-service.monitoring.svc.cluster.local/api/mcp",
+        "headers": {
+          "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langgraph-k8s-ops-agent
+  labels:
+    app: langgraph-k8s-ops-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langgraph-k8s-ops-agent
+  template:
+    metadata:
+      labels:
+        app: langgraph-k8s-ops-agent
+    spec:
+      containers:
+        - name: agent
+          # 替换为实际构建并推送的镜像地址。
+          image: registry.example.com/langgraph-k8s-ops-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 2024
+              protocol: TCP
+          env:
+            - name: APP_ENV
+              value: production
+            - name: OPENAI_MODEL
+              value: gpt-4o-mini
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: OPENAI_API_KEY
+            - name: MCP_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: MCP_BEARER_TOKEN
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langgraph-k8s-ops-agent-secrets
+                  key: DB_PASSWORD
+            - name: POSTGRES_POOL_MAX_SIZE
+              value: "10"
+          volumeMounts:
+            - name: mcp-config
+              mountPath: /app/mcp_server.json
+              subPath: mcp_server.json
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: mcp-config
+          configMap:
+            name: langgraph-k8s-ops-agent-config
+            items:
+              - key: mcp_server.json
+                path: mcp_server.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langgraph-k8s-ops-agent
+  labels:
+    app: langgraph-k8s-ops-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: langgraph-k8s-ops-agent
+  ports:
+    - name: http
+      port: 2024
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,71 @@
+module:
+  name: context_compression
+  version: 1
+  description: 独立的 LangGraph 上下文压缩节点接口
+  package: k8s_ops_agent.context_compression
+
+node:
+  name: context_compression
+  input_state:
+    messages:
+      type: list[langchain_core.messages.BaseMessage]
+      description: LangGraph checkpoint 中保存的原始会话消息，不由压缩节点修改
+  output_state:
+    context_messages:
+      type: list[langchain_core.messages.BaseMessage]
+      description: 仅供本轮 assistant 模型调用的压缩消息视图
+    compression_metadata:
+      type: object
+      description: 本轮 token 估算和压缩状态，不包含消息正文或摘要正文
+
+configuration:
+  CONTEXT_COMPRESSION_ENABLED:
+    type: boolean
+    default: true
+  CONTEXT_WINDOW_TOKENS:
+    type: integer
+    default: 128000
+    minimum: 1024
+  CONTEXT_RESERVED_OUTPUT_TOKENS:
+    type: integer
+    default: 2000
+    minimum: 1
+  CONTEXT_SAFETY_MARGIN_RATIO:
+    type: number
+    default: 0.05
+    minimum: 0.0
+    maximum: 0.5
+  CONTEXT_KEEP_RECENT_MESSAGES:
+    type: integer
+    default: 12
+    minimum: 1
+    description: 保留的最近完整消息组数；包含工具调用和结果的整体消息组
+  CONTEXT_SUMMARY_MODEL:
+    type: string
+    default: OPENAI_MODEL
+  CONTEXT_COMPRESSION_FAILURE_POLICY:
+    type: string
+    enum: [fail_closed]
+    default: fail_closed
+
+behavior:
+  checkpoint_messages_are_immutable: true
+  preserve_latest_user_message: true
+  preserve_system_messages: true
+  preserve_incomplete_tool_call_groups: true
+  summarize_only_complete_historical_groups: true
+  preserve_recent_message_groups: true
+  summary_is_recomputed_from_checkpoint_history: true
+  summary_does_not_replace_original_messages: true
+  context_view_is_cleared_after_assistant_call: true
+  over_budget_policy: raise_context_budget_error
+
+result_metadata:
+  fields:
+    - compressed
+    - input_tokens_before
+    - input_tokens_after
+    - input_token_budget
+    - summarized_message_count
+    - summary_model
+    - warning_code
