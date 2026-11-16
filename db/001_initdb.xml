@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<database name="k8s_ops_agent" source="db/001_故障排查业务数据定义.xml" dialect="postgresql">
+<database name="k8s_ops_agent" source="db/001_initdb.xml" dialect="postgresql">
     <tables>
         <table name="incident_runs" comment="Kubernetes 故障排查会话，与 LangGraph thread 关联">
             <columns>

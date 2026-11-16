@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -32,7 +31,6 @@ from k8s_ops_agent.graph import build_graph
 from k8s_ops_agent.db_config import database_conninfo
 from k8s_ops_agent.middleware import AccessLogMiddleware
 from k8s_ops_agent.observability import logger
-from k8s_ops_agent.schema_sync import sync_schema
 
 
 # 进程启动时读取一次连接配置；不记录凭据，且 database_conninfo() 会拒绝不完整配置。
@@ -71,8 +69,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         if _pool is not None:
             await _pool.open()
             pool_open = True
-            # 先创建应用业务表，再由 LangGraph 使用同一连接池创建并管理 checkpoint 表。
-            await asyncio.to_thread(sync_schema, DATABASE_CONNINFO)
+            # 业务表结构由 Dockerfile 构建阶段执行 scripts/sync_schema.py 同步；
+            # 这里由 LangGraph 使用连接池创建并管理 checkpoint 表。
             await _checkpointer.setup()
         yield
     finally:

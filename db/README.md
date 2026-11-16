@@ -25,7 +25,9 @@ AG-UI 对话消息和 LangGraph 流程状态由 Postgres checkpointer 存在 Lan
 源数据定义文件使用“编号_业务名称”命名，业务表名保持稳定，避免影响已有 SQL 和数据。
 
 设置 `DB_HOST`、`DB_PORT`、`DB_NAME`、`DB_USER`、`DB_PASSWORD` 后执行
-`python scripts/sync_schema.py`。只生成 SQL 可执行
-`python scripts/sync_schema.py --sql-only`。容器构建阶段检查 XML 结构和引用并生成
-`db/001_故障排查业务数据定义.sql`；数据库无法在镜像构建阶段连接，因此实际同步由服务在数据库可用时
-执行，也可在部署阶段手动运行。
+`python scripts/sync_schema.py`；脚本会按文件名顺序扫描 `db/` 目录下的全部 XML
+定义文件并生成、执行对应 SQL，新增定义文件无需修改脚本。只生成 SQL 可执行
+`python scripts/sync_schema.py --sql-only`，只校验不连接数据库可执行
+`python scripts/sync_schema.py --check`。Docker 构建阶段通过 `--build-arg` 传入
+数据库连接参数，由 Dockerfile 的 RUN 步骤直接执行同步；数据库不可用或定义有误时
+构建失败，可避免带病镜像进入生产环境。

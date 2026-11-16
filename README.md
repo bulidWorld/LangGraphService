@@ -56,20 +56,22 @@ or resume an interrupted approval.
 
 Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` separately in
 production, and set `APP_ENV=production`. The server safely builds PostgreSQL
-connection info from those values, opens a psycopg async connection pool, runs
-both application schema synchronization and LangGraph checkpoint setup at
-startup, and uses PostgreSQL to retain threads and interrupt state across
-restarts. `POSTGRES_POOL_MAX_SIZE` controls the pool size (default `10`). The
-service exits at startup in production if any database setting is missing.
+connection info from those values, opens a psycopg async connection pool, and
+runs LangGraph checkpoint setup at startup, using PostgreSQL to retain threads
+and interrupt state across restarts. Application schema synchronization happens
+earlier, at image build time (see Docker below). `POSTGRES_POOL_MAX_SIZE`
+controls the pool size (default `10`). The service exits at startup in
+production if any database setting is missing.
 
 When `APP_ENV` is not `production` and database settings are omitted, the server uses
 an in-memory checkpointer for local development. Those threads disappear when
 the process stops.
 
-The application schema is defined in `db/001_故障排查业务数据定义.xml`. On startup, when
-PostgreSQL settings are configured, the service synchronizes the application tables
-before setting up the LangGraph checkpointer. Run `python scripts/sync_schema.py`
-to synchronize manually, or pass `--sql-only` to print the generated SQL.
+The application schema is defined by all XML files in `db/`, processed in filename
+order. Run `python scripts/sync_schema.py` to synchronize manually, or pass
+`--sql-only` to print the generated SQL and `--check` to validate without a
+database. The Docker build synchronizes the schema from those files in a `RUN`
+step (see Docker below).
 `incident_runs` indexes LangGraph threads, while `approval_requests` stores
 versioned proposals, validated decisions, and resume claims. Conversation messages
 and graph state are persisted by LangGraph's Postgres checkpointer in its own
@@ -78,8 +80,11 @@ checkpoint tables; they are not duplicated in the application business tables.
 ## Docker
 
 ```sh
-docker build -t k8s-ops-agent .
-docker run --env-file .env -p 2024:2024 k8s-ops-agent
+docker build \
+  --build-arg DB_HOST=... --build-arg DB_PORT=... --build-arg DB_NAME=... \
+  --build-arg DB_USER=... --build-arg DB_PASSWORD=... \
+  -t k8s-ops-agent .
+docker run --env-file .env -p 9090:9090 k8s-ops-agent
 ```
 
 Provide `OPENAI_API_KEY`, `APP_ENV=production`, all five `DB_*` settings, and
