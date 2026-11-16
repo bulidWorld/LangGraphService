@@ -58,8 +58,9 @@ Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` separately in
 production, and set `APP_ENV=production`. The server safely builds PostgreSQL
 connection info from those values, opens a psycopg async connection pool, and
 runs LangGraph checkpoint setup at startup, using PostgreSQL to retain threads
-and interrupt state across restarts. Application schema synchronization happens
-earlier, at image build time (see Docker below). `POSTGRES_POOL_MAX_SIZE`
+and interrupt state across restarts. The container entrypoint synchronizes the
+application schema from `db/` at startup before the pool opens (see Docker
+below). `POSTGRES_POOL_MAX_SIZE`
 controls the pool size (default `10`). The service exits at startup in
 production if any database setting is missing.
 
@@ -70,8 +71,9 @@ the process stops.
 The application schema is defined by all XML files in `db/`, processed in filename
 order. Run `python scripts/sync_schema.py` to synchronize manually, or pass
 `--sql-only` to print the generated SQL and `--check` to validate without a
-database. The Docker build synchronizes the schema from those files in a `RUN`
-step (see Docker below).
+database. The Docker build validates the schema with `--check` (no database
+connection); `entrypoint.sh` synchronizes it when the container starts (see
+Docker below).
 `incident_runs` indexes LangGraph threads, while `approval_requests` stores
 versioned proposals, validated decisions, and resume claims. Conversation messages
 and graph state are persisted by LangGraph's Postgres checkpointer in its own
@@ -80,12 +82,14 @@ checkpoint tables; they are not duplicated in the application business tables.
 ## Docker
 
 ```sh
-docker build \
-  --build-arg DB_HOST=... --build-arg DB_PORT=... --build-arg DB_NAME=... \
-  --build-arg DB_USER=... --build-arg DB_PASSWORD=... \
-  -t k8s-ops-agent .
+docker build -t k8s-ops-agent .
 docker run --env-file .env -p 9090:9090 k8s-ops-agent
 ```
+
+When all five `DB_*` settings are present, `entrypoint.sh` runs
+`scripts/sync_schema.py` before starting the server; with none set it skips the
+sync and the server uses the in-memory checkpointer for local development. A
+partial set fails the sync and the container exits.
 
 Provide `OPENAI_API_KEY`, `APP_ENV=production`, all five `DB_*` settings, and
 `MCP_BEARER_TOKEN` in the deployment environment. Store database passwords and

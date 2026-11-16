@@ -69,7 +69,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         if _pool is not None:
             await _pool.open()
             pool_open = True
-            # 业务表结构由 Dockerfile 构建阶段执行 scripts/sync_schema.py 同步；
+            # 业务表结构由容器入口 entrypoint.sh 在启动时执行 scripts/sync_schema.py 同步；
             # 这里由 LangGraph 使用连接池创建并管理 checkpoint 表。
             await _checkpointer.setup()
         yield

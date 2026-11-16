@@ -28,6 +28,7 @@ AG-UI 对话消息和 LangGraph 流程状态由 Postgres checkpointer 存在 Lan
 `python scripts/sync_schema.py`；脚本会按文件名顺序扫描 `db/` 目录下的全部 XML
 定义文件并生成、执行对应 SQL，新增定义文件无需修改脚本。只生成 SQL 可执行
 `python scripts/sync_schema.py --sql-only`，只校验不连接数据库可执行
-`python scripts/sync_schema.py --check`。Docker 构建阶段通过 `--build-arg` 传入
-数据库连接参数，由 Dockerfile 的 RUN 步骤直接执行同步；数据库不可用或定义有误时
-构建失败，可避免带病镜像进入生产环境。
+`python scripts/sync_schema.py --check`。Docker 构建阶段只执行 `--check` 校验
+XML 定义（不连接数据库），定义有误时构建失败；容器启动时由 `entrypoint.sh`
+在配置了全部 `DB_*` 环境变量的情况下执行同步，数据库不可用或定义有误时容器
+启动失败，可避免带病镜像进入生产环境。
