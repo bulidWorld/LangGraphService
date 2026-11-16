@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from ag_ui.core.types import RunAgentInput
 from ag_ui.encoder import EventEncoder
@@ -44,7 +44,6 @@ if APP_ENV == "production" and not DATABASE_CONNINFO:
     )
 
 _pool: AsyncConnectionPool | None = None
-_checkpointer: AsyncPostgresSaver | MemorySaver
 
 if DATABASE_CONNINFO:
     _pool = AsyncConnectionPool(
@@ -54,43 +53,49 @@ if DATABASE_CONNINFO:
         kwargs={"autocommit": True, "prepare_threshold": 0},
         open=False,
     )
-    _checkpointer = AsyncPostgresSaver(_pool)
-else:
-    # 仅供本地开发使用；生产环境启动时必须配置数据库。
-    _checkpointer = MemorySaver()
 
 configure_approval_store(_pool)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """在应用事件循环启动后创建 checkpoint、图和 AG-UI agent。
+
+    参数：
+        app: 当前 FastAPI 应用实例。
+    返回值：应用运行期间的异步生命周期上下文。
+    """
     pool_open = False
     try:
         if _pool is not None:
             await _pool.open()
             pool_open = True
+            # Postgres saver 在当前运行事件循环内创建，避免导入模块时没有 event loop。
+            checkpointer: AsyncPostgresSaver | MemorySaver = AsyncPostgresSaver(_pool)
             # 业务表结构由容器入口 entrypoint.sh 在启动时执行 scripts/sync_schema.py 同步；
             # 这里由 LangGraph 使用连接池创建并管理 checkpoint 表。
-            await _checkpointer.setup()
+            await checkpointer.setup()
+        else:
+            # 仅供本地开发使用；生产环境启动时必须配置数据库。
+            checkpointer = MemorySaver()
+
+        graph = build_graph(checkpointer=checkpointer)
+        app.state.graph = graph
+        app.state.agent = LangGraphAgent(
+            name="k8s_ops_agent",
+            graph=graph,
+            description="Kubernetes incident investigation agent",
+        )
         yield
     finally:
         if _pool is not None and pool_open:
             await _pool.close()
-
-
-graph = build_graph(checkpointer=_checkpointer)
-agent = LangGraphAgent(
-    name="k8s_ops_agent",
-    graph=graph,
-    description="Kubernetes incident investigation agent",
-)
 
 app = FastAPI(
     title="Kubernetes Ops AG-UI Agent",
     version="0.1.0",
     lifespan=lifespan,
 )
-app.state.graph = graph
 app.add_middleware(AccessLogMiddleware)
 cors_origins = [
     origin.strip()
@@ -108,10 +113,11 @@ app.add_middleware(
 )
 
 
-async def _active_interrupts(thread_id: str) -> dict[str, object]:
+async def _active_interrupts(graph: Any, thread_id: str) -> dict[str, object]:
     """读取 thread 当前 checkpoint 中尚未处理的中断。
 
     参数：
+        graph: 当前 FastAPI 生命周期中构建的 LangGraph。
         thread_id: LangGraph 对话标识。
     返回值：以 interrupt ID 为键、原始中断值为值的字典。
     """
@@ -142,7 +148,9 @@ async def _validate_resume(
             detail="This agent accepts one approval resume entry per run",
         )
 
-    interrupts = await _active_interrupts(input_data.thread_id)
+    interrupts = await _active_interrupts(
+        request.app.state.graph, input_data.thread_id
+    )
     if not interrupts:
         raise HTTPException(status_code=409, detail="Thread has no active interrupt")
 
@@ -264,7 +272,7 @@ async def langgraph_agent_endpoint(
     """
     normalized_input = await _validate_resume(input_data, request)
     encoder = EventEncoder(accept=request.headers.get("accept"))
-    request_agent = agent.clone()
+    request_agent = request.app.state.agent.clone()
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """逐条编码并发送 LangGraph agent 事件。
@@ -288,10 +296,16 @@ def agent_health() -> dict[str, object]:
     参数：无。
     返回值：服务状态和 agent 标识。
     """
-    return {"status": "ok", "agent": {"name": agent.name}}
+    return {"status": "ok", "agent": {"name": "k8s_ops_agent"}}
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+async def health(request: Request) -> dict[str, str]:
+    """返回服务健康状态。
+
+    参数：
+        request: 当前 HTTP 请求，用于读取应用级 agent 实例。
+    返回值：服务状态和 agent 标识。
+    """
     logger.info("Health check completed", extra={"log_type": "business"})
-    return {"status": "ok", "agent": agent.name}
+    return {"status": "ok", "agent": request.app.state.agent.name}
