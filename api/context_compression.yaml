@@ -16,7 +16,7 @@ node:
       description: 仅供本轮 assistant 模型调用的压缩消息视图
     compression_metadata:
       type: object
-      description: 本轮 token 估算和压缩状态，不包含消息正文或摘要正文
+      description: 最近一次接口 usage 和压缩状态，不包含消息正文或摘要正文
 
 configuration:
   CONTEXT_COMPRESSION_ENABLED:
@@ -26,27 +26,16 @@ configuration:
     type: integer
     default: 128000
     minimum: 1024
-  CONTEXT_RESERVED_OUTPUT_TOKENS:
-    type: integer
-    default: 2000
-    minimum: 1
-  CONTEXT_SAFETY_MARGIN_RATIO:
-    type: number
-    default: 0.05
-    minimum: 0.0
-    maximum: 0.5
   CONTEXT_KEEP_RECENT_MESSAGES:
     type: integer
     default: 12
     minimum: 1
     description: 保留的最近完整消息组数；包含工具调用和结果的整体消息组
-  CONTEXT_SUMMARY_MODEL:
-    type: string
-    default: OPENAI_MODEL
-  CONTEXT_COMPRESSION_FAILURE_POLICY:
-    type: string
-    enum: [fail_closed]
-    default: fail_closed
+  CONTEXT_COMPRESSION_FALLBACK_TURNS:
+    type: integer
+    default: 200
+    minimum: 1
+    description: 模型 usage 缺失时，按 HumanMessage 数量判断的压缩轮数阈值
 
 behavior:
   checkpoint_messages_are_immutable: true
@@ -58,9 +47,11 @@ behavior:
   summary_is_recomputed_from_checkpoint_history: true
   summary_does_not_replace_original_messages: true
   context_view_is_cleared_after_assistant_call: true
-  over_budget_policy: raise_context_budget_error
+  compression_threshold: 0.7
+  missing_usage_policy: compress_after_fallback_turn_threshold
 
 result_metadata:
+  description: input_tokens_before 来自最近一次模型接口 usage；input_tokens_after 未知，直到压缩后的消息完成模型调用。input_token_budget 表示触发阈值（上下文窗口的 70%）。
   fields:
     - compressed
     - input_tokens_before

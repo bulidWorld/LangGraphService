@@ -1,4 +1,4 @@
-"""上下文预算估算和历史消息摘要实现。"""
+"""按模型接口用量触发历史消息摘要。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-import tiktoken
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -29,7 +28,7 @@ logger = logging.getLogger("k8s_ops_agent.context_compression")
 
 
 class ContextBudgetExceededError(RuntimeError):
-    """受保护消息超出模型输入预算时抛出的错误。"""
+    """usage 达到阈值但没有可安全压缩的历史消息时抛出的错误。"""
 
 
 @dataclass(frozen=True)
@@ -42,17 +41,17 @@ class _MessageGroup:
 
 
 class ContextCompressor:
-    """按模型 token 预算压缩历史消息，并保留原始 checkpoint 数据。"""
+    """按模型接口返回的 token 用量压缩历史消息。"""
 
     def __init__(self, config: CompressionConfig):
         """创建上下文压缩器。
 
         参数：
-            config: 上下文窗口、保留量和摘要模型配置。
+            config: 上下文窗口和近期消息保留策略配置。
         返回值：无。
         """
         self.config = config
-        self._encoding = self._load_encoding(os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+        self.model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self._summary_model: ChatOpenAI | None = None
 
     @classmethod
@@ -67,37 +66,22 @@ class ContextCompressor:
             "1", "true", "yes", "on"
         }
         context_window_tokens = int(os.getenv("CONTEXT_WINDOW_TOKENS", "128000"))
-        reserved_output_tokens = int(
-            os.getenv("CONTEXT_RESERVED_OUTPUT_TOKENS", "2000")
-        )
-        safety_margin_ratio = float(
-            os.getenv("CONTEXT_SAFETY_MARGIN_RATIO", "0.05")
-        )
         keep_recent_messages = int(os.getenv("CONTEXT_KEEP_RECENT_MESSAGES", "12"))
-        failure_policy = os.getenv(
-            "CONTEXT_COMPRESSION_FAILURE_POLICY", "fail_closed"
-        )
-        summary_model = os.getenv(
-            "CONTEXT_SUMMARY_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        fallback_turn_threshold = int(
+            os.getenv("CONTEXT_COMPRESSION_FALLBACK_TURNS", "200")
         )
         if context_window_tokens < 1024:
             raise ValueError("CONTEXT_WINDOW_TOKENS must be at least 1024")
-        if reserved_output_tokens < 1 or reserved_output_tokens >= context_window_tokens:
-            raise ValueError("CONTEXT_RESERVED_OUTPUT_TOKENS is outside the valid range")
-        if not 0 <= safety_margin_ratio <= 0.5:
-            raise ValueError("CONTEXT_SAFETY_MARGIN_RATIO must be between 0 and 0.5")
         if keep_recent_messages < 1:
             raise ValueError("CONTEXT_KEEP_RECENT_MESSAGES must be at least 1")
-        if failure_policy != "fail_closed":
-            raise ValueError("CONTEXT_COMPRESSION_FAILURE_POLICY must be fail_closed")
+        if fallback_turn_threshold < 1:
+            raise ValueError("CONTEXT_COMPRESSION_FALLBACK_TURNS must be at least 1")
         return cls(
             CompressionConfig(
                 enabled=enabled,
                 context_window_tokens=context_window_tokens,
-                reserved_output_tokens=reserved_output_tokens,
-                safety_margin_ratio=safety_margin_ratio,
                 keep_recent_messages=keep_recent_messages,
-                summary_model=summary_model,
+                fallback_turn_threshold=fallback_turn_threshold,
             )
         )
 
@@ -109,18 +93,53 @@ class ContextCompressor:
         参数：
             self: 当前压缩器。
             messages: 已含系统提示词和当前请求的 LangChain 消息序列。
-        返回值：压缩消息及 token 估算、压缩状态等统计数据。
+        返回值：压缩消息、接口用量和压缩状态等统计数据。
         """
         original = list(messages)
-        budget = self._input_budget()
-        before = self._count_tokens(original)
-        if not self.config.enabled or before <= budget:
+        before = self._latest_input_usage(original)
+        threshold = int(self.config.context_window_tokens * 0.70)
+        fallback_turns = sum(
+            isinstance(message, HumanMessage) for message in original
+        )
+        threshold_reached = (
+            before >= threshold
+            if before is not None
+            else fallback_turns >= self.config.fallback_turn_threshold
+        )
+        should_compress = self.config.enabled and threshold_reached
+        if not self.config.enabled:
+            decision_reason = "compression_disabled"
+        elif before is not None and threshold_reached:
+            decision_reason = "usage_threshold_reached"
+        elif before is not None:
+            decision_reason = "usage_below_threshold"
+        elif threshold_reached:
+            decision_reason = "fallback_turn_threshold_reached"
+        else:
+            decision_reason = "fallback_turns_below_threshold"
+        logger.info(
+            "Context compression decision evaluated",
+            extra={
+                "log_type": "business",
+                "compression_enabled": self.config.enabled,
+                "usage_available": before is not None,
+                "input_tokens_before": before,
+                "context_window_tokens": self.config.context_window_tokens,
+                "usage_threshold_ratio": 0.70,
+                "usage_threshold_tokens": threshold,
+                "fallback_turns": fallback_turns,
+                "fallback_turn_threshold": self.config.fallback_turn_threshold,
+                "decision_reason": decision_reason,
+                "should_compress": should_compress,
+            },
+        )
+        if not should_compress:
             return CompressionResult(
                 messages=original,
                 compressed=False,
                 input_tokens_before=before,
-                input_tokens_after=before,
-                input_token_budget=budget,
+                input_tokens_after=None,
+                input_token_budget=threshold,
                 summarized_message_count=0,
                 summary_model=None,
             )
@@ -138,99 +157,56 @@ class ContextCompressor:
 
         keep_count = min(self.config.keep_recent_messages, len(groups))
         first_summarize_count = min(eligible_count, max(0, len(groups) - keep_count))
-        summarize_counts = [first_summarize_count]
-        if eligible_count > first_summarize_count:
-            summarize_counts.append(eligible_count)
-        for summarize_count in summarize_counts:
-            if summarize_count <= 0:
-                continue
-            summarized_groups = groups[:summarize_count]
-            remaining_groups = groups[summarize_count:]
-            summary_text = await self._summarize(summarized_groups)
-            summary_message = SystemMessage(
-                content=(
-                    "<conversation_summary version=\"1\" trust=\"untrusted\">\n"
-                    f"{summary_text}\n</conversation_summary>"
-                )
+        summarize_count = first_summarize_count or eligible_count
+        summarized_groups = groups[:summarize_count]
+        remaining_groups = groups[summarize_count:]
+        summary_text = await self._summarize(summarized_groups)
+        summary_message = SystemMessage(
+            content=(
+                "<conversation_summary version=\"1\" trust=\"untrusted\">\n"
+                f"{summary_text}\n</conversation_summary>"
             )
-            candidate = [
-                *system_messages,
-                summary_message,
-                *(message for group in remaining_groups for message in group.messages),
-            ]
-            after = self._count_tokens(candidate)
-            if after <= budget:
-                summarized_message_count = sum(
-                    len(group.messages) for group in summarized_groups
-                )
-                return CompressionResult(
-                    messages=candidate,
-                    compressed=True,
-                    input_tokens_before=before,
-                    input_tokens_after=after,
-                    input_token_budget=budget,
-                    summarized_message_count=summarized_message_count,
-                    summary_model=self.config.summary_model,
-                )
-
-        raise ContextBudgetExceededError(
-            "context_budget_exceeded: protected or recent messages exceed the input budget"
+        )
+        candidate = [
+            *system_messages,
+            summary_message,
+            *(message for group in remaining_groups for message in group.messages),
+        ]
+        summarized_message_count = sum(
+            len(group.messages) for group in summarized_groups
+        )
+        return CompressionResult(
+            messages=candidate,
+            compressed=True,
+            input_tokens_before=before,
+            input_tokens_after=None,
+            input_token_budget=threshold,
+            summarized_message_count=summarized_message_count,
+            summary_model=self.model_name,
         )
 
-    def _input_budget(self) -> int:
-        """计算扣除输出预留量和安全余量后的输入预算。
+    def _latest_input_usage(self, messages: Sequence[BaseMessage]) -> int | None:
+        """读取最近一次模型响应返回的输入 token 用量。
 
         参数：
             self: 当前压缩器。
-        返回值：允许发送给模型的输入 token 数上限。
+            messages: 原始消息序列。
+        返回值：接口返回的输入 token 数；没有用量信息时返回 None。
         """
-        safety_margin = int(
-            self.config.context_window_tokens * self.config.safety_margin_ratio
-        )
-        return (
-            self.config.context_window_tokens
-            - self.config.reserved_output_tokens
-            - safety_margin
-        )
-
-    def _load_encoding(self, model_name: str) -> tiktoken.Encoding:
-        """按模型获取 tokenizer，未知模型使用保守的通用编码。
-
-        参数：
-            self: 当前压缩器。
-            model_name: 主模型名称。
-        返回值：用于估算消息 token 的编码器。
-        """
-        try:
-            return tiktoken.encoding_for_model(model_name)
-        except KeyError:
-            return tiktoken.get_encoding("cl100k_base")
-
-    def _count_tokens(self, messages: Sequence[BaseMessage]) -> int:
-        """保守估算 LangChain 消息序列的 token 用量。
-
-        参数：
-            self: 当前压缩器。
-            messages: 待估算的消息序列。
-        返回值：包含消息结构开销的 token 估算值。
-        """
-        total = 3
-        for message in messages:
-            try:
-                serialized = json.dumps(
-                    {
-                        "type": message.type,
-                        "content": message.content,
-                        "tool_calls": getattr(message, "tool_calls", []),
-                        "tool_call_id": getattr(message, "tool_call_id", None),
-                    },
-                    ensure_ascii=False,
-                    default=str,
-                )
-            except (TypeError, ValueError):
-                serialized = str(message.content)
-            total += len(self._encoding.encode(serialized)) + 5
-        return total
+        for message in reversed(messages):
+            if not isinstance(message, AIMessage):
+                continue
+            usage = getattr(message, "usage_metadata", None) or {}
+            provider_usage = (message.response_metadata or {}).get("token_usage", {})
+            for value in (
+                usage.get("input_tokens"),
+                provider_usage.get("prompt_tokens"),
+                provider_usage.get("input_tokens"),
+            ):
+                if isinstance(value, int) and value >= 0:
+                    return value
+            return None
+        return None
 
     def _group_messages(
         self, messages: Sequence[BaseMessage]
@@ -321,7 +297,7 @@ class ContextCompressor:
         return True
 
     async def _summarize(self, groups: Sequence[_MessageGroup]) -> str:
-        """使用独立摘要模型压缩早期完整对话片段。
+        """使用主模型压缩早期完整对话片段。
 
         参数：
             self: 当前压缩器。
@@ -330,7 +306,7 @@ class ContextCompressor:
         """
         if self._summary_model is None:
             self._summary_model = ChatOpenAI(
-                model=self.config.summary_model,
+                model=self.model_name,
                 temperature=0,
                 max_tokens=1000,
             )
@@ -358,7 +334,7 @@ class ContextCompressor:
                     "path": "openai.chat.completions.context_summary",
                     "status": 200,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                    "model": self.config.summary_model,
+                    "model": self.model_name,
                 },
             )
         except Exception:
@@ -370,7 +346,7 @@ class ContextCompressor:
                     "path": "openai.chat.completions.context_summary",
                     "status": 500,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                    "model": self.config.summary_model,
+                    "model": self.model_name,
                 },
             )
             raise

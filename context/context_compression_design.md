@@ -18,7 +18,7 @@
 src/k8s_ops_agent/context_compression/
   __init__.py    # 对外接口
   models.py      # 配置和结果数据结构
-  compressor.py  # tokenizer、分组、预算与摘要
+  compressor.py  # usage 读取、消息分组与摘要
   node.py        # LangGraph 节点工厂
 ```
 
@@ -37,15 +37,14 @@ flowchart LR
 
 ## 4. 压缩规则
 
-- 输入预算为上下文窗口减去输出预留量和安全余量；安全余量默认为窗口的 5%。
-- 使用 `tiktoken` 按主模型编码估算 token；未知模型回退到 `cl100k_base`。
+- 使用主模型接口返回的输入 token 用量判断压缩时机；达到上下文窗口的 70% 时压缩。usage 缺失时，按 `HumanMessage` 数量计轮数，默认达到 200 轮后压缩，可通过 `CONTEXT_COMPRESSION_FALLBACK_TURNS` 配置。
 - 系统提示词、最新用户消息和最近消息组保留。
 - assistant 工具调用与对应 ToolMessage 按调用 ID 成组；未完成的调用不进入摘要。
 - 完整的历史纯文本消息组可以摘要；多模态消息或非文本消息保留原文。
 - 摘要提示词要求仅记录输入明确给出的事实，保留故障对象、时间、来源、指标和单位，区分已确认、已排除及未知事项。
 - 摘要以带版本标记的 SystemMessage 加入本轮上下文，并明确标记为不可信内容。
-- 先保留配置数量的近期消息组；若仍超预算，可将更近期的完整消息组也纳入摘要。
-- 如果摘要请求失败、受保护内容超出预算，或无法找到安全的历史摘要区，按失败关闭处理并阻止模型调用。
+- 先保留配置数量的近期消息组；达到阈值后压缩较早的完整消息组。
+- 如果摘要请求失败或无法找到安全的历史摘要区，按失败关闭处理并阻止模型调用。
 
 `CONTEXT_KEEP_RECENT_MESSAGES` 表示完整消息组的数量；包含工具调用和结果的消息组按一个整体计算。checkpoint 中的消息不会因压缩而删除或改写。
 
@@ -58,7 +57,7 @@ flowchart LR
 输出：
 
 - `context_messages: list[BaseMessage]`：本轮 assistant 输入视图。
-- `compression_metadata: dict`：token 估算和压缩状态，不包含正文。
+- `compression_metadata: dict`：接口 usage 和压缩状态，不包含正文。
 
 assistant 节点从 `context_messages` 调用模型，并在成功返回时清空该字段。模型调用异常会沿现有异常处理路径传播。
 
@@ -68,17 +67,14 @@ assistant 节点从 `context_messages` 调用模型，并在成功返回时清�
 
 - `CONTEXT_COMPRESSION_ENABLED=true`
 - `CONTEXT_WINDOW_TOKENS=128000`
-- `CONTEXT_RESERVED_OUTPUT_TOKENS=2000`
-- `CONTEXT_SAFETY_MARGIN_RATIO=0.05`
 - `CONTEXT_KEEP_RECENT_MESSAGES=12`
-- `CONTEXT_SUMMARY_MODEL=gpt-4o-mini`
-- `CONTEXT_COMPRESSION_FAILURE_POLICY=fail_closed`
+- `CONTEXT_COMPRESSION_FALLBACK_TURNS=200`
 
 ## 7. 日志与异常
 
-压缩节点使用 JSON business 日志记录压缩状态、token 估算值、预算和消息组计数，不记录对话或摘要正文。摘要模型请求记录 `log_type=http`、method、path、duration_ms、status；异常记录 `log_type=exception` 和堆栈。超过预算时抛出 `ContextBudgetExceededError`，由 LangGraph 上游错误处理路径接收。
+压缩节点使用 JSON business 日志记录压缩状态、接口 usage 和消息组计数，不记录对话或摘要正文。摘要模型请求记录 `log_type=http`、method、path、duration_ms、status；异常记录 `log_type=exception` 和堆栈。没有可安全压缩的历史消息组时抛出 `ContextBudgetExceededError`，由 LangGraph 上游错误处理路径接收。
 
 ## 8. 依赖
 
-模块使用现有 `langchain-core`、`langchain-openai` 和新增的直接依赖 `tiktoken`。摘要模型默认与 `OPENAI_MODEL` 相同，也可由 `CONTEXT_SUMMARY_MODEL` 单独指定。
+模块使用现有 `langchain-core` 和 `langchain-openai`。压缩和摘要共用 `OPENAI_MODEL`，不单独配置摘要模型。压缩后的 token 用量由后续模型接口返回，在接口调用前不进行 tokenizer 估算。
 

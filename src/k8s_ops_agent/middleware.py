@@ -47,14 +47,15 @@ class AccessLogMiddleware:
             )
             raise
         finally:
-            logger.info(
-                "HTTP request completed",
-                extra={
-                    "log_type": "access",
-                    "trace_id": trace_id,
-                    "method": method,
-                    "path": path,
-                    "status": status,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                },
-            )
+            if path != "/health":
+                logger.info(
+                    "HTTP request completed",
+                    extra={
+                        "log_type": "access",
+                        "trace_id": trace_id,
+                        "method": method,
+                        "path": path,
+                        "status": status,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    },
+                )

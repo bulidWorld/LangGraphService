@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import Future
 import json
+import logging
 import os
 import re
 from functools import lru_cache
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -16,6 +21,12 @@ from k8s_ops_agent.approval import INPUT_TYPES, _validate_input_definitions
 
 MCP_CONFIG_PATH = Path.cwd() / "mcp_server.json"
 ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+logger = logging.getLogger("k8s_ops_agent")
+_TOOLS_CACHE_TTL_SECONDS = 10 * 60
+_tools_cache_lock = threading.Lock()
+_tools_cache: list[BaseTool] | None = None
+_tools_cache_expires_at = 0.0
+_tools_refresh_future: Future[list[BaseTool]] | None = None
 
 
 def expand_env(value: Any) -> Any:
@@ -74,11 +85,72 @@ async def get_operational_tools() -> list[BaseTool]:
     MCP 服务定义采用 ``langchain-mcp-adapters`` 规定的格式。将工具发现逻辑集中在
     此处，使图结构不依赖具体的 Kubernetes、日志、代码仓库或监控集成。
     """
+    global _tools_cache, _tools_cache_expires_at, _tools_refresh_future
+
+    # 锁只保护缓存状态，不跨越 await；并发调用通过共享 Future 等待同一次刷新。
+    with _tools_cache_lock:
+        if _tools_cache is not None and time.monotonic() < _tools_cache_expires_at:
+            return list(_tools_cache)
+        refresh_future = _tools_refresh_future
+        is_refresh_owner = refresh_future is None
+        if is_refresh_owner:
+            refresh_future = Future()
+            _tools_refresh_future = refresh_future
+
+    if not is_refresh_owner:
+        # shield 防止单个等待者取消时连带取消其他线程共享的刷新 Future。
+        return list(await asyncio.shield(asyncio.wrap_future(refresh_future)))
+
+    try:
+        tools = await _discover_operational_tools()
+    except BaseException as exc:
+        with _tools_cache_lock:
+            if _tools_refresh_future is refresh_future:
+                _tools_refresh_future = None
+        refresh_future.set_exception(exc)
+        raise
+
+    with _tools_cache_lock:
+        _tools_cache = list(tools)
+        _tools_cache_expires_at = time.monotonic() + _TOOLS_CACHE_TTL_SECONDS
+        if _tools_refresh_future is refresh_future:
+            _tools_refresh_future = None
+    refresh_future.set_result(list(tools))
+    return list(tools)
+
+
+async def _discover_operational_tools() -> list[BaseTool]:
+    """逐个 MCP 服务发现工具并记录查询过程。
+
+    参数：无。
+    返回值：携带来源服务器名称的 LangChain 工具列表。
+    """
     client = _client()
     tools: list[BaseTool] = []
     # 按服务逐个发现工具，避免适配器合并结果后丢失工具来源。
     for server_name in client.connections:
-        server_tools = await client.get_tools(server_name=server_name)
+        logger.info(
+            "开始查询 MCP 可用工具",
+            extra={"log_type": "business", "mcp_server": server_name},
+        )
+        try:
+            server_tools = await client.get_tools(server_name=server_name)
+        except Exception:
+            logger.exception(
+                "MCP 可用工具查询失败",
+                extra={"log_type": "exception", "mcp_server": server_name},
+            )
+            raise
+        logger.info(
+            "MCP 可用工具查询结果",
+            extra={
+                "log_type": "business",
+                "mcp_server": server_name,
+                "tool_count": len(server_tools),
+                "tool_names": [tool.name for tool in server_tools],
+                "tools_found": bool(server_tools),
+            },
+        )
         for tool in server_tools:
             tool.metadata = {**(tool.metadata or {}), "mcp_server": server_name}
         tools.extend(server_tools)

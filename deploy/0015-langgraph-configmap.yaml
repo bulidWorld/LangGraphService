@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langgraph-service-env
+  namespace: langgraph-service
+data:
+  APP_ENV: production
+  OPENAI_MODEL: gpt-6-luna
+  DB_HOST: pg-ha-rw.database.svc.cluster.local
+  DB_PORT: "5432"
+  DB_NAME: langgraphservice-db
+  DB_USER: langgraphservice
+  POSTGRES_POOL_MAX_SIZE: "10"
+  CONTEXT_COMPRESSION_ENABLED: "true"
+  CONTEXT_WINDOW_TOKENS: "128000"
+  CONTEXT_KEEP_RECENT_MESSAGES: "12"
+  CONTEXT_COMPRESSION_FALLBACK_TURNS: "200"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langgraph-service-config
+  namespace: langgraph-service
+data:
+  # MCP 配置按服务名称组织，可在同一个 JSON 对象中声明多个服务。
+  mcp_server.json: |
+    {
+      "operator-agent-service": {
+        "transport": "streamable_http",
+        "url": "http://operator-agent-service.monitoring.svc.cluster.local/api/mcp",
+        "headers": {
+          "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
+        }
+      }
+    }

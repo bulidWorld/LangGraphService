@@ -14,10 +14,8 @@ class CompressionConfig:
 
     enabled: bool
     context_window_tokens: int
-    reserved_output_tokens: int
-    safety_margin_ratio: float
     keep_recent_messages: int
-    summary_model: str
+    fallback_turn_threshold: int = 200
 
 
 @dataclass(frozen=True)
@@ -26,8 +24,8 @@ class CompressionResult:
 
     messages: list[BaseMessage]
     compressed: bool
-    input_tokens_before: int
-    input_tokens_after: int
+    input_tokens_before: int | None
+    input_tokens_after: int | None
     input_token_budget: int
     summarized_message_count: int
     summary_model: str | None
