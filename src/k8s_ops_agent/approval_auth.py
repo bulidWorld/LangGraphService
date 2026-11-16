@@ -45,7 +45,9 @@ def authorize_approval_role(request: Request, required_role: str | None) -> None
     if isinstance(roles, str):
         roles = [roles]
     if not isinstance(roles, (list, tuple, set)) or required_role not in roles:
-        raise HTTPException(status_code=403, detail="Reviewer lacks the required approval role")
+        raise HTTPException(
+            status_code=403, detail="Reviewer lacks the required approval role"
+        )
 
 
 def validate_approval_answers(
@@ -71,7 +73,9 @@ def validate_approval_answers(
         required = definition.get("required", False)
         if key not in answers:
             if required:
-                raise HTTPException(status_code=422, detail=f"Answer {key!r} is required")
+                raise HTTPException(
+                    status_code=422, detail=f"Answer {key!r} is required"
+                )
             continue
 
         value = answers[key]

@@ -18,58 +18,50 @@ MCP_CONFIG_PATH = Path.cwd() / "mcp_server.json"
 ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def _resolve_config_value(value: Any) -> Any:
-    """递归解析 MCP 配置中的环境变量占位符。
+def expand_env(value: Any) -> Any:
+    """递归替换配置中的环境变量占位符。"""
 
-    参数：
-        value: JSON 解码后的配置值。
-    返回值：占位符已替换的配置值。
-    """
     if isinstance(value, str):
-        def replace_placeholder(match: re.Match[str]) -> str:
-            """用对应环境变量替换配置字符串中的占位符。
-
-            参数：
-                match: 匹配到的环境变量占位符。
-            返回值：环境变量值；变量未设置时抛出配置错误。
-            """
-            variable_name = match.group(1)
-            variable_value = os.getenv(variable_name)
-            if variable_value is None:
-                raise ValueError(
-                    f"Environment variable {variable_name} is required by mcp_server.json"
-                )
-            return variable_value
-
-        return ENV_PLACEHOLDER_PATTERN.sub(replace_placeholder, value)
-    if isinstance(value, list):
-        return [_resolve_config_value(item) for item in value]
+        def replace(match):
+            key = match.group(1)
+            env_value = os.getenv(key)
+            if env_value is None:
+                raise ValueError(f"环境变量 {key} 未配置")
+            return env_value
+        return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", replace, value)
     if isinstance(value, dict):
-        return {
-            key: _resolve_config_value(item)
-            for key, item in value.items()
-        }
+        return {key: expand_env(val) for key, val in value.items()}
+
+    if isinstance(value, list):
+        return [expand_env(item) for item in value]
+
     return value
+
+
+@lru_cache(maxsize=1)
+def load_mcp_config() -> dict[str, Any]:
+    """从环境变量读取 MCP Server 配置。"""
+
+    config_str = os.getenv("MCP_SERVERS_CONFIG")
+
+    if not config_str:
+        raise ValueError("环境变量 MCP_SERVERS_CONFIG 未配置")
+
+    config = json.loads(config_str)
+
+    if not isinstance(config, dict):
+        raise ValueError("MCP_SERVERS_CONFIG 必须是 JSON 对象")
+
+    return expand_env(config)
 
 
 @lru_cache(maxsize=1)
 def _client() -> MultiServerMCPClient:
     """读取 mcp_server.json 和环境变量中的凭据并返回客户端。
-
     参数：无。
     返回值：已缓存的 MCP 多服务客户端。
     """
-    # 配置文件和凭据在进程内缓存；修改 MCP 地址或令牌后需要重启服务生效。
-    try:
-        with MCP_CONFIG_PATH.open(encoding="utf-8") as config_file:
-            config: Any = json.load(config_file)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{MCP_CONFIG_PATH.name} must contain a valid JSON object") from exc
-    except OSError as exc:
-        raise ValueError(f"Unable to read MCP configuration file: {MCP_CONFIG_PATH}") from exc
-    if not isinstance(config, dict):
-        raise ValueError(f"{MCP_CONFIG_PATH.name} must be keyed by server name")
-    config = _resolve_config_value(config)
+    config = load_mcp_config()
     return MultiServerMCPClient(config)
 
 
@@ -147,9 +139,13 @@ def get_tool_policy(tool: BaseTool) -> dict[str, Any]:
         and default_action == "require_approval"
         and not approval_role
     ):
-        raise ValueError(f"MCP tool {tool.name!r} requires approvalRole for its fallback")
+        raise ValueError(
+            f"MCP tool {tool.name!r} requires approvalRole for its fallback"
+        )
     if approval_mode == "none" and approval_role:
-        raise ValueError(f"MCP tool {tool.name!r} cannot use approvalRole with approvalMode=none")
+        raise ValueError(
+            f"MCP tool {tool.name!r} cannot use approvalRole with approvalMode=none"
+        )
     if not isinstance(approval, dict):
         raise ValueError(f"Invalid MCP approval metadata for {tool.name!r}")
 

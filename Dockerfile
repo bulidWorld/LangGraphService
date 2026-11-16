@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir .
 RUN python scripts/sync_schema.py --check \
     && python scripts/sync_schema.py --sql-only > /app/db/001_故障排查业务数据定义.sql
 
-EXPOSE 2024
+EXPOSE 9090
 
-CMD ["uvicorn", "k8s_ops_agent.server:app", "--host", "0.0.0.0", "--port", "2024"]
+CMD ["uvicorn", "langgraph.service:app", "--host", "0.0.0.0", "--port", "9090"]

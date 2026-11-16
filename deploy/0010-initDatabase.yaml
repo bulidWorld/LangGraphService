@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-langgraphservice-auth
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+  username: langgraphservice
+  password: "Changeme_123"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: pg-ha-langgraphservice
+  namespace: database
+spec:
+  cluster:
+    name: pg-ha
+  name: langgraphservice
+  login: true
+  passwordSecret:
+    name: pg-langgraphservice-auth
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: pg-ha-langgraphservice-db
+  namespace: database
+spec:
+  cluster:
+    name: pg-ha
+  name: langgraphservice-db
+  owner: langgraphservice
+  databaseReclaimPolicy: retain
+  extensions:
+    - name: pg_stat_statements

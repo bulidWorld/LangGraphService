@@ -108,6 +108,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
 async def _active_interrupts(thread_id: str) -> dict[str, object]:
     """读取 thread 当前 checkpoint 中尚未处理的中断。
 
@@ -151,11 +153,15 @@ async def _validate_resume(
         # 只接受当前 thread checkpoint 中存在的中断，避免跨 thread 或伪造 interrupt ID。
         raw_interrupt = interrupts.get(entry.interrupt_id)
         if not isinstance(raw_interrupt, dict):
-            raise HTTPException(status_code=409, detail="Resume entry is not an active approval")
+            raise HTTPException(
+                status_code=409, detail="Resume entry is not an active approval"
+            )
 
         request_id = raw_interrupt.get("request_id")
         if not isinstance(request_id, str):
-            raise HTTPException(status_code=409, detail="Active interrupt has no approval request")
+            raise HTTPException(
+                status_code=409, detail="Active interrupt has no approval request"
+            )
 
         if entry.status == "cancelled":
             # AG-UI 取消不携带业务 payload；request_id 必须从可信 checkpoint 读取。
@@ -171,9 +177,13 @@ async def _validate_resume(
             # resolved payload 只允许业务决定字段，审核人和决定时间由服务端补充。
             submitted = entry.payload
             if not isinstance(submitted, dict):
-                raise HTTPException(status_code=422, detail="Resume payload must be an object")
+                raise HTTPException(
+                    status_code=422, detail="Resume payload must be an object"
+                )
             if set(submitted) - {"request_id", "status", "answers", "comment"}:
-                raise HTTPException(status_code=422, detail="Resume payload has unsupported fields")
+                raise HTTPException(
+                    status_code=422, detail="Resume payload has unsupported fields"
+                )
             if submitted.get("request_id") != request_id:
                 raise HTTPException(
                     status_code=409,
@@ -181,15 +191,21 @@ async def _validate_resume(
                 )
             decision_status = submitted.get("status")
             if decision_status not in {"approved", "rejected"}:
-                raise HTTPException(status_code=422, detail="Invalid approval decision status")
+                raise HTTPException(
+                    status_code=422, detail="Invalid approval decision status"
+                )
             answers = submitted.get("answers", {})
             if not isinstance(answers, dict):
-                raise HTTPException(status_code=422, detail="Approval answers must be an object")
+                raise HTTPException(
+                    status_code=422, detail="Approval answers must be an object"
+                )
             comment = submitted.get("comment")
             if comment is not None and (
                 not isinstance(comment, str) or len(comment) > 4000
             ):
-                raise HTTPException(status_code=422, detail="Approval comment is invalid")
+                raise HTTPException(
+                    status_code=422, detail="Approval comment is invalid"
+                )
 
         approval = await get_approval_request(request_id)
         if (
@@ -226,7 +242,9 @@ async def _validate_resume(
             decision,
         )
         if not recorded:
-            raise HTTPException(status_code=409, detail="Approval was already decided or resumed")
+            raise HTTPException(
+                status_code=409, detail="Approval was already decided or resumed"
+            )
 
         if entry.status == "resolved":
             normalized_entries.append(entry.model_copy(update={"payload": decision}))

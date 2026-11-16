@@ -56,19 +56,30 @@ def _validate(root: ET.Element) -> None:
             col_type = column.get("type", "")
             if not SQL_TYPE.fullmatch(col_type):
                 raise ValueError(f"Unsupported SQL type: {col_type!r}")
-            if column.get("identity", "false").lower() == "true" and col_type != "integer":
-                raise ValueError("Identity columns must use integer per database conventions")
+            if (
+                column.get("identity", "false").lower() == "true"
+                and col_type != "integer"
+            ):
+                raise ValueError(
+                    "Identity columns must use integer per database conventions"
+                )
             ref_table, ref_col = column.get("ref-table"), column.get("ref-col")
             if bool(ref_table) != bool(ref_col):
-                raise ValueError(f"{table_name}.{column.get('name')} must set both ref-table and ref-col")
+                raise ValueError(
+                    f"{table_name}.{column.get('name')} must set both ref-table and ref-col"
+                )
             if ref_table:
                 if ref_table not in available or ref_col not in available[ref_table]:
                     raise ValueError(f"Unknown reference {ref_table}.{ref_col}")
         for constraint in table.findall("./constraints/*"):
             if constraint.tag == "check":
-                raise ValueError("Database CHECK constraints are disabled by project convention")
+                raise ValueError(
+                    "Database CHECK constraints are disabled by project convention"
+                )
             if constraint.tag == "foreign-key":
-                raise ValueError("Database foreign keys are disabled by project convention")
+                raise ValueError(
+                    "Database foreign keys are disabled by project convention"
+                )
             _identifier(constraint.get("name", ""))
             for name in constraint.get("columns", "").split():
                 if name not in names:
@@ -77,7 +88,9 @@ def _validate(root: ET.Element) -> None:
             _identifier(index.get("name", ""))
             for column in index.findall("./column"):
                 if column.get("name") not in names:
-                    raise ValueError(f"Unknown index column {table_name}.{column.get('name')}")
+                    raise ValueError(
+                        f"Unknown index column {table_name}.{column.get('name')}"
+                    )
 
 
 def _table_sql(table: ET.Element) -> list[str]:
@@ -98,9 +111,17 @@ def _table_sql(table: ET.Element) -> list[str]:
         kind = {"primary-key": "PRIMARY KEY", "unique": "UNIQUE"}.get(constraint.tag)
         if not kind:
             continue
-        columns = ", ".join(_identifier(col) for col in constraint.get("columns", "").split())
-        parts.append(f"CONSTRAINT {_identifier(constraint.get('name', ''))} {kind} ({columns})")
-    statements = [f"CREATE TABLE IF NOT EXISTS {_identifier(name)} (\n    " + ",\n    ".join(parts) + "\n);"]
+        columns = ", ".join(
+            _identifier(col) for col in constraint.get("columns", "").split()
+        )
+        parts.append(
+            f"CONSTRAINT {_identifier(constraint.get('name', ''))} {kind} ({columns})"
+        )
+    statements = [
+        f"CREATE TABLE IF NOT EXISTS {_identifier(name)} (\n    "
+        + ",\n    ".join(parts)
+        + "\n);"
+    ]
     # 为旧版本数据库补充新增字段；字段类型等破坏性变更必须通过显式迁移完成。
     for column in _columns(table):
         col_type = column.get("type", "")
@@ -119,7 +140,9 @@ def _table_sql(table: ET.Element) -> list[str]:
         if not kind:
             continue
         constraint_name = constraint.get("name", "")
-        columns = ", ".join(_identifier(col) for col in constraint.get("columns", "").split())
+        columns = ", ".join(
+            _identifier(col) for col in constraint.get("columns", "").split()
+        )
         statements.append(
             "DO $$ BEGIN "
             f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = {_quoted_text(constraint_name)} "
@@ -128,7 +151,9 @@ def _table_sql(table: ET.Element) -> list[str]:
             f"{kind} ({columns}); END IF; END $$;"
         )
     if table.get("comment"):
-        statements.append(f"COMMENT ON TABLE {_identifier(name)} IS {_quoted_text(table.get('comment', ''))};")
+        statements.append(
+            f"COMMENT ON TABLE {_identifier(name)} IS {_quoted_text(table.get('comment', ''))};"
+        )
     for column in _columns(table):
         if column.get("comment"):
             statements.append(
@@ -165,7 +190,9 @@ def schema_sql(schema_file: Path = SCHEMA_FILE) -> str:
     for table in root.findall("./tables/table"):
         statements.extend(_table_sql(table))
     for statement in root.findall("./statements/statement"):
-        statements.append(statement.findtext("./sql", default="").strip().rstrip(";") + ";")
+        statements.append(
+            statement.findtext("./sql", default="").strip().rstrip(";") + ";"
+        )
     return "\n\n".join(statements) + "\n"
 
 
@@ -176,4 +203,3 @@ def sync_schema(conninfo: str) -> None:
         with connection.cursor() as cursor:
             # connection 上下文会把幂等 DDL 作为一个事务提交；任一语句失败则整体回滚。
             cursor.execute(schema_sql())
-

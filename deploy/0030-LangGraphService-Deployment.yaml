@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: langgraph-k8s-ops-agent-config
+  name: langgraph-service-config
 data:
   # MCP 配置按服务名称组织，可在同一个 JSON 对象中声明多个服务。
   mcp_server.json: |
@@ -18,29 +18,34 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: langgraph-k8s-ops-agent
+  name: langgraph-service-deployment
   labels:
-    app: langgraph-k8s-ops-agent
+    app: langgraph-service
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: langgraph-k8s-ops-agent
+      app: langgraph-service
   template:
     metadata:
       labels:
-        app: langgraph-k8s-ops-agent
+        app: langgraph-service
     spec:
       containers:
         - name: agent
           # 替换为实际构建并推送的镜像地址。
-          image: registry.example.com/langgraph-k8s-ops-agent:latest
+          image: registry.example.com/langgraph-service:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 2024
+              containerPort: 9090
               protocol: TCP
           env:
+            - name: MCP_SERVERS_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: langgraph-service-config
+                  key: mcp_server.json
             - name: APP_ENV
               value: production
             - name: OPENAI_MODEL
@@ -48,45 +53,40 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: OPENAI_API_KEY
             - name: MCP_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: MCP_BEARER_TOKEN
             - name: DB_HOST
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: DB_HOST
             - name: DB_PORT
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: DB_PORT
             - name: DB_NAME
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: DB_NAME
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: DB_USER
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: langgraph-k8s-ops-agent-secrets
+                  name: langgraph-service-secrets
                   key: DB_PASSWORD
             - name: POSTGRES_POOL_MAX_SIZE
               value: "10"
-          volumeMounts:
-            - name: mcp-config
-              mountPath: /app/mcp_server.json
-              subPath: mcp_server.json
-              readOnly: true
           readinessProbe:
             httpGet:
               path: /health
@@ -106,26 +106,19 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-      volumes:
-        - name: mcp-config
-          configMap:
-            name: langgraph-k8s-ops-agent-config
-            items:
-              - key: mcp_server.json
-                path: mcp_server.json
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: langgraph-k8s-ops-agent
+  name: langgraph-service-service
   labels:
-    app: langgraph-k8s-ops-agent
+    app: langgraph-service
 spec:
   type: ClusterIP
   selector:
-    app: langgraph-k8s-ops-agent
+    app: langgraph-service
   ports:
     - name: http
-      port: 2024
+      port: 9090
       targetPort: http
       protocol: TCP

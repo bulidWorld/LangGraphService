@@ -144,13 +144,16 @@ async def tools_node(
             )
             if approval_mode == "conditional" and default_action == "deny":
                 output = f"Tool {name!r} was denied by its MCP security policy."
-                results.append(ToolMessage(content=str(output), tool_call_id=call["id"]))
+                results.append(
+                    ToolMessage(content=str(output), tool_call_id=call["id"])
+                )
                 continue
             if requires_approval:
                 thread_id = config.get("configurable", {}).get("thread_id", "")
                 request_id = str(
-                    uuid.uuid5(uuid.NAMESPACE_URL,
-                              f"mcp-approval:{thread_id}:{call['id']}")
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"mcp-approval:{thread_id}:{call['id']}"
+                    )
                 )
                 server_name = policy["mcp_server"]
                 async with operation_observation(
@@ -160,7 +163,9 @@ async def tools_node(
                     decision = await request_mcp_tool_approval(
                         request_id=request_id,
                         thread_id=thread_id,
-                        run_id=str(config.get("run_id")) if config.get("run_id") else None,
+                        run_id=str(config.get("run_id"))
+                        if config.get("run_id")
+                        else None,
                         server_name=server_name,
                         tool_name=name,
                         tool_arguments=call.get("args", {}),
@@ -211,7 +216,11 @@ async def tools_node(
                 )
                 logger.exception(
                     "MCP tool invocation failed",
-                    extra={"log_type": "exception", "mcp_server": server_name, "tool": name},
+                    extra={
+                        "log_type": "exception",
+                        "mcp_server": server_name,
+                        "tool": name,
+                    },
                 )
                 output = f"Tool call failed ({type(exc).__name__}): {exc}"
         results.append(ToolMessage(content=str(output), tool_call_id=call["id"]))
@@ -247,5 +256,3 @@ def build_graph(*, checkpointer: Any = None):
     )
     builder.add_edge("tools", "context_compression")
     return builder.compile(checkpointer=checkpointer)
-
-
