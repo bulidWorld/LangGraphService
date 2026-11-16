@@ -71,9 +71,8 @@ the process stops.
 The application schema is defined by all XML files in `db/`, processed in filename
 order. Run `python scripts/sync_schema.py` to synchronize manually, or pass
 `--sql-only` to print the generated SQL and `--check` to validate without a
-database. The Docker build validates the schema with `--check` (no database
-connection); `entrypoint.sh` synchronizes it when the container starts (see
-Docker below).
+database. The Docker build does not touch the database; `entrypoint.sh`
+synchronizes the schema when the container starts (see Docker below).
 `incident_runs` indexes LangGraph threads, while `approval_requests` stores
 versioned proposals, validated decisions, and resume claims. Conversation messages
 and graph state are persisted by LangGraph's Postgres checkpointer in its own
