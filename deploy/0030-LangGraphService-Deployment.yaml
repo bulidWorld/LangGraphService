@@ -2,6 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: langgraph-service-config
+  namespace: langgraph-service
 data:
   # MCP 配置按服务名称组织，可在同一个 JSON 对象中声明多个服务。
   mcp_server.json: |
@@ -19,6 +20,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: langgraph-service-deployment
+  namespace: langgraph-service
   labels:
     app: langgraph-service
 spec:
@@ -34,7 +36,7 @@ spec:
       containers:
         - name: agent
           # 替换为实际构建并推送的镜像地址。
-          image: registry.example.com/langgraph-service:latest
+          image: lingxi.image.io/kunpeng/agent/langgraph-service/langgraph-service:v0.007
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -111,6 +113,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: langgraph-service-service
+  namespace: langgraph-service
   labels:
     app: langgraph-service
 spec:

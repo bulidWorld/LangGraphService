@@ -19,4 +19,4 @@ RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ .
 EXPOSE 9090
 
 ENTRYPOINT ["sh", "/app/entrypoint.sh"]
-CMD ["uvicorn", "langgraph.service:app", "--host", "0.0.0.0", "--port", "9090"]
+CMD ["uvicorn", "k8s_ops_agent.server:app", "--host", "0.0.0.0", "--port", "9090"]
