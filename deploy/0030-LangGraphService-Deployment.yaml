@@ -18,7 +18,7 @@ spec:
       containers:
         - name: agent
           # 替换为实际构建并推送的镜像地址。
-          image: lingxi.image.io/kunpeng/agent/langgraph-service/langgraph-service:v0.011
+          image: lingxi.image.io/kunpeng/agent/langgraph-service/langgraph-service:v0.012
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -29,12 +29,6 @@ spec:
                 name: langgraph-service-env
             - secretRef:
                 name: langgraph-service-secrets
-          env:
-            - name: MCP_SERVERS_CONFIG
-              valueFrom:
-                configMapKeyRef:
-                  name: langgraph-service-config
-                  key: mcp_server.json
           readinessProbe:
             httpGet:
               path: /health

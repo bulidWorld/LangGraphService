@@ -5,7 +5,9 @@ metadata:
   namespace: langgraph-service
 data:
   APP_ENV: production
+  HTTP_LOG_PAYLOAD_ENABLED: "true"
   OPENAI_MODEL: gpt-6-luna
+  OPENAI_BASE_URL: http://192.168.100.133:8787/v1
   DB_HOST: pg-ha-rw.database.svc.cluster.local
   DB_PORT: "5432"
   DB_NAME: langgraphservice-db
@@ -15,15 +17,7 @@ data:
   CONTEXT_WINDOW_TOKENS: "128000"
   CONTEXT_KEEP_RECENT_MESSAGES: "12"
   CONTEXT_COMPRESSION_FALLBACK_TURNS: "200"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: langgraph-service-config
-  namespace: langgraph-service
-data:
-  # MCP 配置按服务名称组织，可在同一个 JSON 对象中声明多个服务。
-  mcp_server.json: |
+  MCP_SERVERS_CONFIG: |
     {
       "operator-agent-service": {
         "transport": "streamable_http",
