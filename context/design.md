@@ -23,26 +23,94 @@ const agent = new LangGraphAgent({
 });
 ```
 
-### 上下文压缩模块
+### 审批事件设计
 
-上下文压缩能力通过独立 Python 模块 `k8s_ops_agent.context_compression` 提供，并以 LangGraph `context_compression` 节点接入主图。模块接口定义见 `api/context_compression.yaml`。
+审批交互使用 AG-UI 1.0 标准 interrupt/resume 协议。协议没有单独的 `APPROVAL_*` 事件类型；审批等待通过 `RUN_FINISHED` 的 `outcome.type="interrupt"` 表示。服务端不以 `CUSTOM` 事件或旧版自定义 interrupt 事件替代标准协议。
 
-图执行顺序为：
+#### 审批等待事件
 
-```mermaid
-flowchart LR
-    START --> context_compression --> assistant
-    assistant -->|有工具调用| tools --> context_compression
-    assistant -->|无工具调用| END
+一次运行进入审批等待时，事件顺序如下：
+
+1. 正常发送 `RUN_STARTED` 及运行期间产生的消息、工具和活动事件。
+2. 可选地通过时间线活动 `ACTIVITY_DELTA` 更新活动模型中的审批条目为 `awaiting_approval`。这是前端时间线展示数据，不承担恢复协议。
+3. 以 `RUN_FINISHED` 结束当前 run，并在 `outcome` 中携带一个或多个 `Interrupt`。该事件代表运行已暂停，不能同时报告成功 outcome。
+
+审批等待的标准事件示例：
+
+```json
+{
+  "type": "RUN_FINISHED",
+  "threadId": "thread-123",
+  "runId": "run-456",
+  "outcome": {
+    "type": "interrupt",
+    "interrupts": [
+      {
+        "id": "interrupt-789",
+        "reason": "approval_required",
+        "message": "需要审核后才能执行重启操作。",
+        "responseSchema": {
+          "type": "object",
+          "required": ["request_id", "status", "answers"],
+          "properties": {
+            "request_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["approved", "rejected"]},
+            "answers": {"type": "object"},
+            "comment": {"type": "string"}
+          }
+        },
+        "metadata": {
+          "kind": "approval",
+          "requestId": "approval-uuid",
+          "approvalRequest": {
+            "schema_version": 1,
+            "action": "restart_container",
+            "title": "审批容器重启",
+            "rationale": "Pod 多次重启，需确认处置方案。",
+            "change_plan": "重启目标容器并观察恢复情况。",
+            "evidence": [],
+            "inputs": []
+          }
+        }
+      }
+    ]
+  }
+}
 ```
 
-`context_compression` 节点读取 checkpoint 中的原始 `messages`，结合 `prepare_prompt_messages` 生成系统提示词和当前消息。节点使用主模型接口返回的输入 token 用量；达到上下文窗口的 70% 时，使用主模型压缩较早且已完成的纯文本消息组，保留系统提示词、最新用户请求和近期消息。usage 缺失时，按 `HumanMessage` 数量计轮数，默认达到 200 轮后压缩，可由 `CONTEXT_COMPRESSION_FALLBACK_TURNS` 配置；assistant 工具调用及其结果按调用 ID 成组处理，不拆分未完成的工具调用，多模态消息不进入摘要。
+`Interrupt.id` 是恢复时使用的协议标识；`reason` 和 `message` 说明暂停原因；`responseSchema` 描述恢复答案的 JSON 结构；`metadata` 是 AG-UI 允许的开放扩展字段，用于携带项目审批请求。`metadata.approvalRequest` 的字段结构沿用本文的审批请求模型。审批表单只依据该请求定义渲染，决定仍由服务端重新校验。协议字段使用 camelCase；现有审批业务对象的 snake_case 字段保持兼容，不能误认为它们是 AG-UI 外层事件字段。
 
-节点将本轮模型输入写入单独的 `context_messages` 状态键，assistant 节点只读取该视图并在调用模型后清空该键。压缩不覆盖原始 `messages`，后续轮次始终从原始历史重新生成摘要。LangGraph 节点快照可能包含临时 `context_messages`；该字段不作为业务历史或审批记录使用。
+`toolCallId` 仅在该中断针对一个具体工具调用时填写；审批在工具执行前暂停时可填写对应调用 ID。普通人工审批不是由前端工具调用产生时，不设置该字段。`expiresAt` 可选，使用 ISO-8601 时间；未配置过期时间时省略。不得在 interrupt metadata 或响应 schema 中放审核人身份、认证凭据或服务端决定时间。
 
-摘要失败或没有可安全压缩的历史消息组时，压缩节点抛出 `ContextBudgetExceededError` 并中止模型调用，不静默删除当前请求或工具证据。模块不使用 tokenizer 估算 token 用量；所有日志仅记录接口 usage 和压缩状态，不记录消息或摘要正文。
+#### 恢复事件与决定
 
-配置项：`CONTEXT_COMPRESSION_ENABLED`、`CONTEXT_WINDOW_TOKENS`、`CONTEXT_KEEP_RECENT_MESSAGES`、`CONTEXT_COMPRESSION_FALLBACK_TURNS`。摘要模型与 `OPENAI_MODEL` 共用。示例值见 `.env.example`。
+审批人批准或拒绝后，前端按 AG-UI `RunAgentInput.resume` 提交 `ResumeEntry`，并为继续执行启动新的 run。`interruptId` 必须匹配前一 `RUN_FINISHED.outcome.interrupts[].id`；批准或拒绝使用 `status="resolved"`，决定对象放在 `payload`。取消审批使用 `status="cancelled"`，不得携带 `payload`。示例：
+
+```json
+{
+  "threadId": "thread-123",
+  "runId": "run-457",
+  "messages": [],
+  "resume": [
+    {
+      "interruptId": "interrupt-789",
+      "status": "resolved",
+      "payload": {
+        "request_id": "approval-uuid",
+        "status": "approved",
+        "answers": {"restart_window": "now"},
+        "comment": "可以执行"
+      }
+    }
+  ]
+}
+```
+
+取消示例：`{"interruptId":"interrupt-789","status":"cancelled"}`。取消不传业务 payload；服务端从可信 interrupt/checkpoint 取得 `request_id`，记录取消决定后恢复或结束图执行。
+
+服务端必须在恢复图之前校验 interrupt 属于当前 thread、审批请求仍处于 pending、审核人身份与角色可信、请求 ID 匹配且答案符合审批表单定义；校验成功后才原子保存决定并将规范化 payload 交给 adapter。重复决定或重复占用同一恢复权返回冲突。审核人、角色和决定时间由服务端认证上下文及服务端时钟生成，不能信任前端 payload。
+
+审批事件与活动时间线的职责不同：标准 `RUN_FINISHED` interrupt 是暂停和恢复的协议依据；可选的 `ACTIVITY_DELTA` 只更新时间线条目状态。前端以 interrupt outcome 判定需要展示审批表单，不能只依赖活动条目，也不能将审批请求另发为自定义事件。
 
 ### 审批模型设计
 
@@ -195,6 +263,128 @@ flowchart LR
 ```
 
 取消时 `resume` 项使用 `{"interruptId":"interrupt-789","status":"cancelled"}`，不传 `payload`。`messages` 仍按 AG-UI `RunAgentInput` 提供当前对话消息；审核人身份、角色和决定时间不得放入 payload，由服务端认证上下文生成。
+
+
+### AG-UI 活动事件与执行流程模型
+
+本节定义项目自己的 `ACTIVITY_SNAPSHOT.content` 数据模型。AG-UI 规定事件外层结构和传输语义；`content` 内的字段由项目定义。前端将其显示为按执行先后排列的时间线，不绘制流程图、不建立事件父子关系。
+
+#### 活动消息与快照
+
+一次对话 thread 使用一个稳定的活动 `messageId` 表示当前 agent 任务时间线，`activityType` 固定为 `agent_run`。`ACTIVITY_SNAPSHOT` 的 `content` 是完整状态，可用于首次展示及恢复同步；`ACTIVITY_DELTA` 的 `patch` 是符合 RFC 6902 的有序 JSON Patch，针对相同 `messageId` 的 content 应用。外层事件的 `timestamp` 使用 Unix 毫秒时间戳。content 内的时间统一使用 ISO-8601 UTC 字符串。
+
+快照结构示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "run": {
+    "runId": "run-123",
+    "threadId": "thread-456",
+    "status": "running",
+    "startedAt": "2026-11-17T10:00:00.000Z",
+    "updatedAt": "2026-11-17T10:00:02.120Z",
+    "finishedAt": null,
+    "error": null
+  },
+  "events": [
+    {
+      "id": "model-1",
+      "sequence": 1,
+      "type": "model_inference",
+      "title": "大模型回复",
+      "status": "completed",
+      "startedAt": "2026-11-17T10:00:00.100Z",
+      "updatedAt": "2026-11-17T10:00:01.300Z",
+      "finishedAt": "2026-11-17T10:00:01.300Z",
+      "input": {"summary": "分析 Pod 重启问题"},
+      "output": {
+        "messageId": "msg-assistant-1",
+        "text": "我先查询 Pod 状态和近期事件。",
+        "content": []
+      },
+      "error": null
+    },
+    {
+      "id": "tool-1",
+      "sequence": 2,
+      "type": "tool_execution",
+      "title": "查询 Pod 状态",
+      "status": "completed",
+      "startedAt": "2026-11-17T10:00:01.350Z",
+      "updatedAt": "2026-11-17T10:00:02.100Z",
+      "finishedAt": "2026-11-17T10:00:02.100Z",
+      "tool": {"name": "get_pod_status", "server": "kubernetes"},
+      "input": {"namespace": "prod", "pod": "api-abc"},
+      "output": {
+        "content": [{"type": "text", "text": "Pod is Running; restartCount=3"}],
+        "structuredContent": {"phase": "Running", "restartCount": 3},
+        "resources": []
+      },
+      "error": null
+    }
+  ]
+}
+```
+
+#### 字段定义
+
+| 字段 | 定义 |
+| --- | --- |
+| `schemaVersion` | content 模型版本；不兼容变更递增版本。未知版本时前端展示可读的降级信息 |
+| `run.runId`、`run.threadId` | 本次 agent 运行和所属对话的标识 |
+| `run.status` | `queued`、`running`、`awaiting_approval`、`completed`、`failed`、`cancelled` 之一。结束状态时填写 `finishedAt` |
+| `run.startedAt`、`run.updatedAt`、`run.finishedAt` | run 的 UTC 时间；未结束时 `finishedAt` 为 `null`，每次状态或事件内容变化时更新 `updatedAt` |
+| `run.error` | run 失败时的错误摘要；其他状态为 `null` |
+| `events` | 纯平铺事件数组，按 `sequence` 升序展示；不包含 `parentId` 或其他关系字段 |
+| `events[].id` | 事件实例的稳定唯一标识；更新同一事件时保持不变 |
+| `events[].sequence` | 在该时间线内单调递增的整数；事件追加后不得重排或复用 |
+| `events[].type` | 当前支持 `model_inference`、`tool_execution`、`system_step`、`approval`；未知类型由前端按通用时间线条目展示 |
+| `events[].title` | 前端展示的简短标题 |
+| `events[].status` | `queued`、`running`、`awaiting_approval`、`completed`、`failed`、`cancelled` 之一 |
+| `events[].startedAt`、`events[].updatedAt`、`events[].finishedAt` | 事件的 UTC 时间；运行中或排队中的事件 `finishedAt` 为 `null` |
+| `events[].tool` | 工具事件的描述，至少包括工具名称，可选 MCP server 名称 |
+| `events[].input` | 脱敏后的输入摘要。工具调用只放适合前端展示的参数；模型调用不放完整 prompt 或隐藏推理内容 |
+| `events[].output` | 模型面向用户的回复或工具结果。模型文本放 `text`，多模态块按顺序放 `content`；工具可包含 MCP `content`、`structuredContent` 和资源引用 |
+| `events[].error` | 事件失败时的安全错误摘要；成功或仍在运行时为 `null` |
+| `events[].approval` | 审批事件可包含 `requestId` 和当前审批状态，表单定义仍以既有 `approval_request` 为准 |
+
+`content` 和事件对象使用 camelCase 命名。`output.content` 是有序内容块数组；文本、图片、音频、资源链接或资源引用保留各自类型，不将整个结果强制转换成字符串。字段允许在后续版本扩展，前端应忽略未知可选字段。
+
+#### 事件更新规则
+
+1. run 开始时发送一个完整快照，包含 `run.status=running` 和空的 `events` 数组。
+2. 模型调用开始时追加 `model_inference` 事件，状态为 `running`；面向用户的回复流到时更新该事件的 `output.text` 或 `output.content`，结束后将状态改为 `completed`。隐藏推理内容不进入活动数据。
+3. 每次工具实际开始执行时追加一个 `tool_execution` 事件，记录脱敏输入；工具返回后在同一事件写入完整规范化结果并设置终态。工具调用请求本身不代表工具已执行。
+4. 状态或内容改变时发送 `ACTIVITY_DELTA`，只包含对现有 content 可应用的 RFC 6902 操作；追加事件使用 `add`，更新字段使用 `replace` 或 `add`。数组项按 `sequence` 追加，不删除或重排既有事件。
+5. 模型或工具失败时，更新对应事件为 `failed` 并提供安全错误摘要。run 结束后设置 run 终态及 `finishedAt`。
+6. 等待审批时设置 `run.status=awaiting_approval`，追加或更新 `approval` 事件为 `awaiting_approval`。审批恢复后继续更新同一条 thread 时间线，保留已有事件及其 ID，再追加恢复后的执行事件。
+7. 客户端若无法应用 patch，应停止应用后续增量并获取完整快照；AG-UI 活动事件本身没有内建 patch 序号，不能依赖协议事件检测增量缺口。
+
+工具参数、工具输出和模型回复在发送前执行脱敏和大小限制。敏感参数不得发给前端；大型结果按工具返回规范保存摘要、资源 URI、MIME 类型、原始大小及截断标记。活动数据用于实时展示，不替代 LangGraph checkpoint、审批决定存储或审计记录。活动事件作为时间线的唯一数据源；其他 AG-UI 消息/工具事件仍可驱动常规聊天 UI，但前端不得将其重复合并到活动时间线。
+
+### 上下文压缩模块
+
+上下文压缩能力通过独立 Python 模块 `k8s_ops_agent.context_compression` 提供，并以 LangGraph `context_compression` 节点接入主图。模块接口定义见 `api/context_compression.yaml`。
+
+图执行顺序为：
+
+```mermaid
+flowchart LR
+    START --> context_compression --> assistant
+    assistant -->|有工具调用| tools --> context_compression
+    assistant -->|无工具调用| END
+```
+
+`context_compression` 节点读取 checkpoint 中的原始 `messages`，结合 `prepare_prompt_messages` 生成系统提示词和当前消息。节点使用主模型接口返回的输入 token 用量；达到上下文窗口的 70% 时，使用主模型压缩较早且已完成的纯文本消息组，保留系统提示词、最新用户请求和近期消息。usage 缺失时，按 `HumanMessage` 数量计轮数，默认达到 200 轮后压缩，可由 `CONTEXT_COMPRESSION_FALLBACK_TURNS` 配置；assistant 工具调用及其结果按调用 ID 成组处理，不拆分未完成的工具调用，多模态消息不进入摘要。
+
+节点将本轮模型输入写入单独的 `context_messages` 状态键，assistant 节点只读取该视图并在调用模型后清空该键。压缩不覆盖原始 `messages`，后续轮次始终从原始历史重新生成摘要。LangGraph 节点快照可能包含临时 `context_messages`；该字段不作为业务历史或审批记录使用。
+
+摘要失败或没有可安全压缩的历史消息组时，压缩节点抛出 `ContextBudgetExceededError` 并中止模型调用，不静默删除当前请求或工具证据。模块不使用 tokenizer 估算 token 用量；所有日志仅记录接口 usage 和压缩状态，不记录消息或摘要正文。
+
+配置项：`CONTEXT_COMPRESSION_ENABLED`、`CONTEXT_WINDOW_TOKENS`、`CONTEXT_KEEP_RECENT_MESSAGES`、`CONTEXT_COMPRESSION_FALLBACK_TURNS`。摘要模型与 `OPENAI_MODEL` 共用。示例值见 `.env.example`。
+
+
 
 ### MCP 工具设计
 

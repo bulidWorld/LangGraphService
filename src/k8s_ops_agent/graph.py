@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import time
 import uuid
 from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from k8s_ops_agent.approval import request_human_approval, request_mcp_tool_approval
 from k8s_ops_agent.context_compression import build_context_compression_node
+from k8s_ops_agent.db_config import database_conninfo
 from k8s_ops_agent.mcp_registry import get_operational_tool_map, get_tool_policy
 from k8s_ops_agent.observability import (
     logger,

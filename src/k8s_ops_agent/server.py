@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import os
+import json
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 from ag_ui.core.types import RunAgentInput
+from ag_ui.core.events import (
+    ActivityDeltaEvent,
+    ActivitySnapshotEvent,
+    EventType,
+)
 from ag_ui.encoder import EventEncoder
 from ag_ui_langgraph import LangGraphAgent
 from fastapi import FastAPI, HTTPException, Request
@@ -27,8 +35,8 @@ from k8s_ops_agent.approval_store import (
     get_approval_request,
     record_approval_resume,
 )
-from k8s_ops_agent.graph import build_graph
 from k8s_ops_agent.db_config import database_conninfo
+from k8s_ops_agent.graph import build_graph
 from k8s_ops_agent.middleware import AccessLogMiddleware
 from k8s_ops_agent.observability import logger
 
@@ -288,7 +296,165 @@ async def langgraph_agent_endpoint(
         参数：无。
         返回值：编码后的 AG-UI 事件文本。
         """
+        activity_id = f"{input_data.thread_id}:agent_run"
+        activity_type = "agent_run"
+        started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        content: dict[str, Any] = {
+            "schemaVersion": 1,
+            "run": {
+                "runId": input_data.run_id,
+                "threadId": input_data.thread_id,
+                "status": "running",
+                "startedAt": started_at,
+                "updatedAt": started_at,
+                "finishedAt": None,
+                "error": None,
+            },
+            "events": [],
+        }
+        sequence = 0
+        active_by_tool_call: dict[str, dict[str, Any]] = {}
+        active_models: list[dict[str, Any]] = []
+
+        def timestamp_ms() -> int:
+            """获取当前 Unix 毫秒时间戳。
+
+            参数：无。
+            返回值：当前时间对应的毫秒时间戳。
+            """
+            return time.time_ns() // 1_000_000
+
+        def iso_now() -> str:
+            """获取当前 UTC ISO-8601 时间。
+
+            参数：无。
+            返回值：毫秒精度并以 Z 结尾的 UTC 时间。
+            """
+            return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        def snapshot() -> ActivitySnapshotEvent:
+            """创建当前 thread 时间线的完整快照。
+
+            参数：无。
+            返回值：符合 AG-UI 协议的活动快照事件。
+            """
+            return ActivitySnapshotEvent(
+                timestamp=timestamp_ms(),
+                message_id=activity_id,
+                activity_type=activity_type,
+                content=content,
+            )
+
+        def patch(operations: list[dict[str, Any]]) -> ActivityDeltaEvent:
+            """创建指向稳定活动消息的 RFC 6902 增量事件。
+
+            参数：
+                operations: 已按顺序更新本地 content 的 JSON Patch 操作。
+            返回值：符合 AG-UI 协议的活动增量事件。
+            """
+            return ActivityDeltaEvent(
+                timestamp=timestamp_ms(),
+                message_id=activity_id,
+                activity_type=activity_type,
+                patch=operations,
+            )
+
+        def add_activity(kind: str, title: str, extra: dict[str, Any] | None = None) -> tuple[dict[str, Any], ActivityDeltaEvent]:
+            """按序追加一个活动条目并生成对应 patch。
+
+            参数：kind 为活动类型；title 为展示标题；extra 为条目附加字段。
+            返回值：新条目及追加操作对应的 AG-UI 增量事件。
+            """
+            nonlocal sequence
+            sequence += 1
+            now = iso_now()
+            item = {
+                "id": f"{kind}-{uuid4().hex}", "sequence": sequence, "type": kind,
+                "title": title, "status": "running", "startedAt": now,
+                "updatedAt": now, "finishedAt": None, "input": {},
+                "output": None, "error": None,
+            }
+            if extra:
+                item.update(extra)
+            content["events"].append(item)
+            content["run"]["updatedAt"] = now
+            return item, patch([
+                {"op": "add", "path": "/events/-", "value": item},
+                {"op": "replace", "path": "/run/updatedAt", "value": now},
+            ])
+
+        def update_activity(item: dict[str, Any], values: dict[str, Any]) -> ActivityDeltaEvent:
+            """更新活动条目字段并生成 RFC 6902 patch。
+
+            参数：item 为已存在条目；values 为要更新的字段和值。
+            返回值：对应更新操作的 AG-UI 增量事件。
+            """
+            now = iso_now()
+            operations: list[dict[str, Any]] = []
+            for key, value in {**values, "updatedAt": now}.items():
+                operation = "replace" if key in item else "add"
+                item[key] = value
+                operations.append({"op": operation, "path": f"/events/{item['sequence'] - 1}/{key}", "value": value})
+            content["run"]["updatedAt"] = now
+            operations.append({"op": "replace", "path": "/run/updatedAt", "value": now})
+            return patch(operations)
+
+        yield encoder.encode(snapshot())
+
         async for event in request_agent.run(normalized_input):
+            event_type = getattr(event, "type", None)
+            if event_type == EventType.STEP_STARTED and event.step_name == "assistant":
+                item, delta = add_activity("model_inference", "大模型回复")
+                active_models.append(item)
+                yield encoder.encode(delta)
+            elif event_type == EventType.STEP_FINISHED and event.step_name == "assistant":
+                if active_models:
+                    item = active_models.pop()
+                    now = iso_now()
+                    yield encoder.encode(update_activity(item, {"status": "completed", "finishedAt": now}))
+            elif event_type == EventType.TOOL_CALL_START:
+                item, delta = add_activity("tool_execution", event.tool_call_name, {
+                    "tool": {"name": event.tool_call_name},
+                    "input": {},
+                })
+                active_by_tool_call[event.tool_call_id] = item
+                yield encoder.encode(delta)
+            elif event_type == EventType.TOOL_CALL_RESULT:
+                item = active_by_tool_call.pop(event.tool_call_id, None)
+                if item:
+                    result = getattr(event, "result", None)
+                    try:
+                        normalized = json.loads(json.dumps(result, ensure_ascii=False, default=str))
+                    except (TypeError, ValueError):
+                        normalized = {"summary": str(result)[:2000]}
+                    yield encoder.encode(update_activity(item, {
+                        "status": "completed", "finishedAt": iso_now(), "output": normalized,
+                    }))
+            elif event_type in (EventType.RUN_FINISHED, EventType.RUN_ERROR):
+                outcome = getattr(event, "outcome", None)
+                interrupted = getattr(outcome, "type", None) == "interrupt"
+                final_status = "failed" if event_type == EventType.RUN_ERROR else "awaiting_approval" if interrupted else "completed"
+                if interrupted:
+                    approvals = getattr(outcome, "interrupts", []) or []
+                    for interruption in approvals:
+                        item, delta = add_activity("approval", "等待审批", {
+                            "status": "awaiting_approval",
+                            "approval": {"requestId": (getattr(interruption, "metadata", None) or {}).get("requestId"), "status": "awaiting_approval"},
+                        })
+                        item["finishedAt"] = None
+                        yield encoder.encode(delta)
+                for item in [*active_models, *active_by_tool_call.values()]:
+                    if item["status"] == "running":
+                        terminal = "failed" if final_status == "failed" else "cancelled" if final_status == "completed" else "awaiting_approval"
+                        yield encoder.encode(update_activity(item, {"status": terminal, "finishedAt": iso_now() if terminal != "awaiting_approval" else None}))
+                now = iso_now()
+                content["run"].update(status=final_status, updatedAt=now, finishedAt=now, error=(str(getattr(event, "message", ""))[:1000] or None) if final_status == "failed" else None)
+                yield encoder.encode(patch([
+                    {"op": "replace", "path": "/run/status", "value": final_status},
+                    {"op": "replace", "path": "/run/updatedAt", "value": now},
+                    {"op": "replace", "path": "/run/finishedAt", "value": now},
+                    {"op": "replace", "path": "/run/error", "value": content["run"]["error"]},
+                ]))
             yield encoder.encode(event)
 
     return StreamingResponse(

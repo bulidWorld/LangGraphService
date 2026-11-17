@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import unittest
 from unittest.mock import patch
+import unittest
 
 from fastapi.testclient import TestClient
 
