@@ -85,6 +85,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             name="k8s_ops_agent",
             graph=graph,
             description="Kubernetes incident investigation agent",
+            # 前端按 AG-UI 标准从 RUN_FINISHED.outcome.interrupts 渲染审批框，
+            # 并通过 RunAgentInput.resume 恢复执行；旧版 on_interrupt 自定义事件
+            # 不包含标准 ResumeEntry 所需的完整中断信息。
+            enable_legacy_on_interrupt_event=False,
+            emit_interrupt_outcome=True,
+            # LangGraph 底层回调已由适配器转换为消息、工具、步骤和状态等
+            # AG-UI 原生事件；关闭 RAW 透传以避免重复事件和大体积内部状态。
+            emit_raw_events=True,
         )
         yield
     finally:

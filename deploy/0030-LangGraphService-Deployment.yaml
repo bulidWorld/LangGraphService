@@ -18,7 +18,7 @@ spec:
       containers:
         - name: agent
           # 替换为实际构建并推送的镜像地址。
-          image: lingxi.image.io/kunpeng/agent/langgraph-service/langgraph-service:v0.012
+          image: lingxi.image.io/kunpeng/agent/langgraph-service/langgraph-service:v0.013
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

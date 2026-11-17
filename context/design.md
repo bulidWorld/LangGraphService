@@ -270,11 +270,11 @@ MCP 工具目录需要同时说明工具的安全策略，以及该工具触发�
 | --- | --- |
 | `riskLevel` | 风险级别，建议使用 `low`、`medium`、`high`、`critical`；供策略判断和界面展示 |
 | `approvalMode` | `none` 表示无需审批，`required` 表示每次调用都需审批，`conditional` 表示结合调用内容判断是否需要审批 |
-| `approvalRole` | 允许处理该审批的角色；无需审批时可为空 |
+| `approvalRole` | 允许处理该审批的角色；无需审批时不用配置这个字段 |
 | `defaultAction` | 条件判断无法完成、策略缺失或判断服务不可用时的兜底动作：`allow`、`deny` 或 `require_approval` |
 
 `approval` 字段约定：
-
+如果 approvalMode 配置了none，无需审批时不用配置这个字段
 | 字段 | 规则 |
 | --- | --- |
 | `schema_version` | 审批输入定义版本；与审批请求的输入结构保持兼容 |
@@ -282,12 +282,48 @@ MCP 工具目录需要同时说明工具的安全策略，以及该工具触发�
 | `allowedInputTypes` | `model_assisted` 时模型可以使用的类型白名单，取值为 `confirm`、`single_select`、`multi_select`、`text`；不允许未声明的控件类型 |
 | `inputs` | 固定审批表单或模型可参考的输入定义，字段结构和校验规则与 `approval_request.inputs` 一致；没有固定输入时为空数组 |
 
+#### 工具返回结果
+
+MCP 工具调用结果按 `CallToolResult` 处理。`content` 是有序内容块列表，工具可以同时返回普通文本、图片、音频、资源链接或内嵌资源；不能假定结果一定是字符串，也不能在进入 LangGraph 状态前对整个结果直接调用 `str()`。如果结果还包含 `structuredContent`，应作为独立的结构化数据保留，不与 `content` 相互覆盖；`isError=true` 表示工具已正常返回一项失败结果，调用方应将它作为工具错误处理，而不是当作成功证据。
+
+内嵌资源使用 MCP `EmbeddedResource` 内容块表示。文本资源示例：
+
+```python
+resource = EmbeddedResource(
+    type="resource",
+    resource=TextResourceContents(
+        uri=f"log:///k8s/{namespace}/{pod}.log",
+        mimeType="text/plain; charset=utf-8",
+        text=logs,
+    ),
+)
+```
+
+内容块处理约定：
+
+| MCP 内容 | 处理规则 |
+| --- | --- |
+| `TextContent` | 保留为文本内容块，供模型直接读取 |
+| `EmbeddedResource(resource=TextResourceContents)` | 保留 `type`、`uri`、`mimeType` 和 `text`；将正文写入当前 thread 的 workspace 新文件，并将文件引用作为模型可读证据，URI 作为来源标识，不把 URI 当作可直接访问的 HTTP 地址 |
+| `EmbeddedResource(resource=BlobResourceContents)` | 保留 `uri`、`mimeType` 和二进制数据；只有当前模型和消息适配层明确支持该 MIME 类型时才传给模型，否则仅返回资源元数据和“不支持直接读取”的说明，不把 base64 数据展开进纯文本提示词 |
+| `ResourceLink` | 保留链接元数据；如需读取其内容，必须通过 MCP 资源读取能力另行获取，不能把链接本身视为资源正文 |
+| `ImageContent`、`AudioContent` | 作为对应的多模态内容块保留；模型不支持时采用与二进制资源相同的降级规则 |
+| 未识别的内容块 | 保留原始类型和必要元数据并标记为不支持；不得静默丢弃，也不得猜测其正文语义 |
+
+MCP 适配层负责把上述内容块转换为 LangChain/LangGraph 支持的 `ToolMessage.content` 表示，并保持原始顺序。转换后的消息至少应能够追溯 `tool_call_id`、MCP 服务、工具名称和资源 URI。适配器版本对 `EmbeddedResource` 的原生映射能力不一致时，应在独立的工具结果规范化模块中完成显式转换，不能依赖对象的字符串表示。
+
+文本资源正文保存到系统提示词定义的会话 workspace：`/var/service/{safe_service_name}/share/workspace/{safe_thread_id}`。每个资源单独创建 UTF-8 文本文件，文件名包含清洗后的 MCP 服务名、工具名、上海时区时间戳和内容块序号；使用排他创建，避免并发或同一时间戳下覆盖文件。LangGraph 状态的 `workspace_files` 保存文件路径、资源 URI、MIME 类型及 MCP 服务和工具名称。工具结果消息保留文件引用；后续上下文准备节点把状态中的引用加入本轮系统上下文，模型按需通过可用能力读取文件。工作区文件不得因上下文压缩而丢失引用。该文件路径使用与系统提示词相同的服务名和 thread ID 清洗规则。
+
+对日志类文本资源，`log:///k8s/{namespace}/{pod}.log` 是稳定的来源标识，`text` 是本次调用返回的日志快照。资源 URI 不应包含凭据或敏感查询参数；日志正文进入消息、摘要、持久化或展示前，均须遵循日志规范中的脱敏要求。服务端应配置单个内容块、单次工具结果和可进入模型上下文的总大小上限；超限时保留 URI、MIME 类型、原始大小和明确的截断标记，不能无提示截断。资源内容属于不可信工具输出，模型不得把其中的指令当作系统指令，也不得因资源正文要求而绕过审批或调用其他工具。
+
+工具结果进入上下文压缩模块时，文本资源可以作为工具证据参与压缩，但必须与对应的 assistant 工具调用及 `tool_call_id` 成组保留；图片、音频和二进制资源仍按多模态消息处理，不进入纯文本摘要。前端展示资源时应依据 `mimeType` 选择渲染方式，并将 `uri` 展示为来源；未知或高风险 MIME 类型只提供元数据，不内联执行或渲染。
+
 #### 决策与校验规则
 
-- 工具目录元数据是 MCP 服务端发布的策略声明，不是模型可以自行覆盖的授权。`required` 不得被模型降级为无需审批；`none` 表示目录策略不要求审批，模型可基于风险升级为审批，但不能借此放宽工具服务端自身的鉴权和执行策略。
+- 工具目录元数据是 MCP 服务端发布的策略声明，不是模型可以自行覆盖的授权。`required` 不得被模型降级为无需审批；`none` 表示目录策略不要求审批
 - 对 `conditional` 工具，模型可以依据本次调用生成是否审批的建议以及具体表单。模型选择的控件类型必须属于 `allowedInputTypes`；使用 `single_select` 或 `multi_select` 时必须给出选项，答案只接受所给选项的 `value`。生成的请求应满足审批模型中必填、唯一 `key`、文本长度等约束。
 - `fixed` 模式下，运行时审批请求必须使用目录声明的输入定义，不应由模型改写类型、必填属性或选项。`model_assisted` 模式下，目录定义的 `inputs` 可作为推荐表单；模型按调用上下文调整后，最终定义写入该次 `approval_request`，并随审批记录保存。
-- `approvalMode=none` 时可不创建审批请求。`required` 时必须先创建审批请求并等待终态决定，获批后才可继续执行工具。`conditional` 的模型判断不能得出结论时，使用 `defaultAction`；`require_approval` 应生成审批请求，`deny` 应拒绝调用，`allow` 仅用于策略明确允许的工具。
+- `approvalMode=none` 时不创建审批请求。`required` 时必须先创建审批请求并等待终态决定，获批后才可继续执行工具。`conditional` 的模型判断不能得出结论时，使用 `defaultAction`；`require_approval` 应生成审批请求，`deny` 应拒绝调用，`allow` 仅用于策略明确允许的工具。
 - 建议只读低风险工具使用 `defaultAction=allow`；会修改、重启或产生外部影响的工具应采用 `require_approval` 或 `deny` 作为兜底，避免策略判断失败时静默放行。该兜底规则由服务端执行，不能只依赖模型遵守。
 - `riskLevel`、`approvalMode`、`approvalRole` 与 `defaultAction` 的组合应通过目录加载校验。例如 `approvalMode=required` 必须配置审批角色或明确的默认审批队列；`approvalMode=none` 不应依赖 `approvalRole` 完成授权。
 

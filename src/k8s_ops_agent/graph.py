@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 import uuid
 from typing import Any, Literal, TypedDict
@@ -21,6 +22,7 @@ from k8s_ops_agent.observability import (
     update_observation,
 )
 from k8s_ops_agent.prompts import prepare_prompt_messages
+from k8s_ops_agent.workspace_resources import save_embedded_text_resources
 
 
 class AgentState(MessagesState, total=False):
@@ -28,6 +30,7 @@ class AgentState(MessagesState, total=False):
 
     context_messages: list[BaseMessage]
     compression_metadata: dict[str, Any]
+    workspace_files: list[dict[str, str]]
 
 
 context_compression_node = build_context_compression_node(prepare_prompt_messages)
@@ -38,6 +41,171 @@ def _model() -> ChatOpenAI:
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
     )
+
+
+def _tool_message_content(output: Any) -> Any:
+    """将工具结果转换为 ToolMessage 可接受的内容。
+
+    参数：
+        output: 工具执行结果。
+    返回值：适合放入 ToolMessage.content 的内容。
+    """
+    if isinstance(output, (str, list)):
+        return output
+    value = output.model_dump(mode="python") if hasattr(output, "model_dump") else output
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _tool_result_messages(
+    output: Any, call_id: str, *, is_error: bool = False
+) -> list[ToolMessage]:
+    """根据工具返回的 MCP 结果结构生成消息。
+
+    参数：
+        output: MCP 工具返回结果。
+        call_id: 对应的工具调用 ID。
+    返回值：保留内容块和结构化结果的工具消息列表。
+    """
+    if is_error or (
+        isinstance(output, dict) and output.get("isError", output.get("is_error", False))
+    ):
+        content = output.get("content", output)
+        message = ToolMessage(
+            content=_tool_message_content(content),
+            tool_call_id=call_id,
+            status="error",
+        )
+        return [message]
+
+    if isinstance(output, dict) and isinstance(output.get("content"), list):
+        content = output["content"]
+        structured = output.get("structuredContent", output.get("structured_content"))
+        if structured is not None:
+            content = [*content, {
+                "type": "text",
+                "text": "结构化工具结果：" + json.dumps(structured, ensure_ascii=False, default=str),
+            }]
+        return [ToolMessage(content=_tool_message_content(content), tool_call_id=call_id)]
+
+    return [ToolMessage(content=_tool_message_content(output), tool_call_id=call_id)]
+
+
+async def _execute_approval_tool(
+    tool: Any, call: dict[str, Any], config: RunnableConfig
+) -> Any:
+    """执行人工审批工具并传入稳定的审批请求标识。
+
+    参数：
+        tool: 人工审批工具。
+        call: 模型生成的工具调用。
+        config: 当前 LangGraph 运行配置。
+    返回值：审批工具的执行结果。
+    """
+    thread_id = config.get("configurable", {}).get("thread_id", "")
+    request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"k8s_ops_agent:{thread_id}:{call['id']}"))
+    tool_config = {
+        **config,
+        "configurable": {
+            **config.get("configurable", {}),
+            "approval_request_id": request_id,
+        },
+    }
+    async with operation_observation("approval.request", {"tool": tool.name}):
+        return await tool.ainvoke(call.get("args", {}), config=tool_config)
+
+
+async def _execute_mcp_tool(
+    tool: Any,
+    call: dict[str, Any],
+    config: RunnableConfig,
+    policy: dict[str, Any],
+) -> tuple[Any, list[dict[str, str]], bool]:
+    """按策略审批并执行 MCP 工具，转换其内嵌文本资源。
+
+    参数：
+        tool: MCP 工具对象。
+        call: 模型生成的工具调用。
+        config: 当前 LangGraph 运行配置。
+        policy: 工具安全策略和服务元数据。
+    返回值：工具返回结果及本次保存的工作区文件元数据。
+    """
+    name = call["name"]
+    security = policy["security"]
+    approval_mode = security.get("approvalMode", "none")
+    default_action = security.get("defaultAction", "require_approval")
+    if approval_mode == "conditional" and default_action == "deny":
+        return f"Tool {name!r} was denied by its MCP security policy.", [], False
+
+    thread_id = config.get("configurable", {}).get("thread_id", "")
+    requires_approval = approval_mode == "required" or (
+        approval_mode == "conditional" and default_action == "require_approval"
+    )
+    if requires_approval:
+        request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mcp-approval:{thread_id}:{call['id']}"))
+        server_name = policy["mcp_server"]
+        async with operation_observation(
+            "approval.request", {"mcp_server": server_name, "tool": name}
+        ):
+            decision = await request_mcp_tool_approval(
+                request_id=request_id,
+                thread_id=thread_id,
+                run_id=str(config.get("run_id")) if config.get("run_id") else None,
+                server_name=server_name,
+                tool_name=name,
+                tool_arguments=call.get("args", {}),
+                approval_role=security.get("approvalRole"),
+                inputs=policy["approval"]["inputs"],
+            )
+        if decision.get("status") != "approved":
+            return (
+                f"Tool {name!r} was not executed because approval status was "
+                f"{decision.get('status', 'unknown')}.",
+                [],
+                False,
+            )
+
+    server_name = policy["mcp_server"]
+    started = time.perf_counter()
+    try:
+        async with operation_observation(
+            "mcp.tool", {"mcp_server": server_name, "tool": name}
+        ) as observation:
+            output = await tool.ainvoke(call.get("args", {}))
+            is_error = isinstance(output, dict) and output.get(
+                "isError", output.get("is_error", False)
+            )
+            output, new_files = save_embedded_text_resources(
+                output,
+                thread_id=str(thread_id),
+                server_name=server_name,
+                tool_name=name,
+            )
+            update_observation(observation, output={"status": "success"})
+        logger.info(
+            "MCP tool request completed",
+            extra={
+                "log_type": "http", "method": "POST",
+                "path": f"mcp.servers/{server_name}/tools/{name}",
+                "mcp_server": server_name, "tool": name, "status": 200,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
+        return output, new_files, is_error
+    except Exception as exc:
+        logger.error(
+            "MCP tool request failed",
+            extra={
+                "log_type": "http", "method": "POST",
+                "path": f"mcp.servers/{server_name}/tools/{name}",
+                "mcp_server": server_name, "tool": name, "status": 500,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
+        logger.exception(
+            "MCP tool invocation failed",
+            extra={"log_type": "exception", "mcp_server": server_name, "tool": name},
+        )
+        return f"Tool call failed ({type(exc).__name__}): {exc}", [], True
 
 
 async def assistant_node(
@@ -92,8 +260,8 @@ async def assistant_node(
 
 
 async def tools_node(
-    state: MessagesState, config: RunnableConfig
-) -> dict[str, list[ToolMessage]]:
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
     """按模型给出的顺序执行工具，并为审批中断生成稳定请求标识。
 
     参数：
@@ -108,123 +276,31 @@ async def tools_node(
     tool_map = await get_operational_tool_map()
     tool_map[request_human_approval.name] = request_human_approval
     results: list[ToolMessage] = []
+    workspace_files = list(state.get("workspace_files", []))
     for call in last_message.tool_calls:
         name = call["name"]
         tool = tool_map.get(name)
         if tool is None:
             output: Any = f"Tool {name!r} is not registered."
+            call_messages = [ToolMessage(content=str(output), tool_call_id=call["id"])]
         elif name == request_human_approval.name:
             # LangGraph 中断属于流程控制，不是工具异常；让中断向外传播，服务才能
             # 暂停执行并等待人工审批。
-            async with operation_observation("approval.request", {"tool": name}):
-                thread_id = config.get("configurable", {}).get("thread_id", "")
-                request_id = str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"k8s_ops_agent:{thread_id}:{call['id']}",
-                    )
-                )
-                tool_config = {
-                    **config,
-                    "configurable": {
-                        **config.get("configurable", {}),
-                        "approval_request_id": request_id,
-                    },
-                }
-                output = await tool.ainvoke(call.get("args", {}), config=tool_config)
+            output = await _execute_approval_tool(tool, call, config)
+            call_messages = _tool_result_messages(output, call["id"])
         else:
-            # 排查用只读工具失败时，将错误作为证据返回给模型，让模型说明信息缺口，
-            # 而不是直接终止整个排查流程。
+            # MCP 工具结果统一规范化，但根据 CallToolResult 的错误、内容块和结构化
+            # 返回类型分别构造消息；普通返回值则保留原有的 JSON 转换行为。
             policy = get_tool_policy(tool)
-            security = policy["security"]
-            approval_mode = security.get("approvalMode", "none")
-            default_action = security.get("defaultAction", "require_approval")
-            requires_approval = approval_mode == "required" or (
-                approval_mode == "conditional" and default_action == "require_approval"
+            output, new_files, is_error = await _execute_mcp_tool(
+                tool, call, config, policy
             )
-            if approval_mode == "conditional" and default_action == "deny":
-                output = f"Tool {name!r} was denied by its MCP security policy."
-                results.append(
-                    ToolMessage(content=str(output), tool_call_id=call["id"])
-                )
-                continue
-            if requires_approval:
-                thread_id = config.get("configurable", {}).get("thread_id", "")
-                request_id = str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL, f"mcp-approval:{thread_id}:{call['id']}"
-                    )
-                )
-                server_name = policy["mcp_server"]
-                async with operation_observation(
-                    "approval.request",
-                    {"mcp_server": server_name, "tool": name},
-                ):
-                    decision = await request_mcp_tool_approval(
-                        request_id=request_id,
-                        thread_id=thread_id,
-                        run_id=str(config.get("run_id"))
-                        if config.get("run_id")
-                        else None,
-                        server_name=server_name,
-                        tool_name=name,
-                        tool_arguments=call.get("args", {}),
-                        approval_role=security.get("approvalRole"),
-                        inputs=policy["approval"]["inputs"],
-                    )
-                if decision.get("status") != "approved":
-                    output = (
-                        f"Tool {name!r} was not executed because approval status was "
-                        f"{decision.get('status', 'unknown')}."
-                    )
-                    results.append(ToolMessage(content=output, tool_call_id=call["id"]))
-                    continue
-
-            started = time.perf_counter()
-            try:
-                server_name = policy["mcp_server"]
-                async with operation_observation(
-                    "mcp.tool", {"mcp_server": server_name, "tool": name}
-                ) as observation:
-                    output = await tool.ainvoke(call.get("args", {}))
-                    update_observation(observation, output={"status": "success"})
-                logger.info(
-                    "MCP tool request completed",
-                    extra={
-                        "log_type": "http",
-                        "method": "POST",
-                        "path": f"mcp.servers/{server_name}/tools/{name}",
-                        "mcp_server": server_name,
-                        "tool": name,
-                        "status": 200,
-                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                    },
-                )
-            except Exception as exc:
-                # 工具调用失败也作为证据返回，供助手说明或尝试其他排查路径。
-                logger.error(
-                    "MCP tool request failed",
-                    extra={
-                        "log_type": "http",
-                        "method": "POST",
-                        "path": f"mcp.servers/{server_name}/tools/{name}",
-                        "mcp_server": server_name,
-                        "tool": name,
-                        "status": 500,
-                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                    },
-                )
-                logger.exception(
-                    "MCP tool invocation failed",
-                    extra={
-                        "log_type": "exception",
-                        "mcp_server": server_name,
-                        "tool": name,
-                    },
-                )
-                output = f"Tool call failed ({type(exc).__name__}): {exc}"
-        results.append(ToolMessage(content=str(output), tool_call_id=call["id"]))
-    return {"messages": results}
+            workspace_files.extend(new_files)
+            call_messages = _tool_result_messages(
+                output, call["id"], is_error=is_error
+            )
+        results.extend(call_messages)
+    return {"messages": results, "workspace_files": workspace_files}
 
 
 def route_after_assistant(state: MessagesState) -> Literal["tools", "end"]:

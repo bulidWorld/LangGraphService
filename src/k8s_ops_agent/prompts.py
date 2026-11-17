@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import BaseMessage, SystemMessage
+
+from k8s_ops_agent.env_util import get_service_name
 
 
 SYSTEM_PROMPT = """你是 Kubernetes 故障定位助手。用中文回答，基于工具返回的证据，不要臆测。
@@ -30,13 +31,12 @@ def build_system_prompt(thread_id: str) -> str:
         thread_id: 当前 LangGraph 会话标识。
     返回值：包含当前服务工作目录和上海日期的系统提示词。
     """
-    service_name = os.getenv("SERVICE_NAME", "k8s_ops_agent")
-    safe_service_name = re.sub(r"[^A-Za-z0-9._-]", "_", service_name).strip("._")
+    service_name = get_service_name()
     safe_thread_id = re.sub(r"[^A-Za-z0-9._-]", "_", thread_id).strip("._")
-    safe_service_name = safe_service_name or "k8s_ops_agent"
+    agent_name = "k8s_ops_agent"
     safe_thread_id = safe_thread_id or "unknown"
     current_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    workspace = f"/var/service/{safe_service_name}/share/workspace/{safe_thread_id}"
+    workspace = f"/var/service/{service_name}/share/workspace/{agent_name}/{safe_thread_id}"
     environment_context = f"""<environment_context>
   <cwd>{workspace}</cwd>
   <shell>bash</shell>

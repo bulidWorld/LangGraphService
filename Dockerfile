@@ -7,6 +7,7 @@ WORKDIR /app
 
 # 将源码、数据库定义和同步工具一并放入镜像。
 COPY pyproject.toml ./
+COPY build_meta.json ./build_meta.json
 COPY src ./src
 COPY db ./db
 COPY scripts ./scripts
