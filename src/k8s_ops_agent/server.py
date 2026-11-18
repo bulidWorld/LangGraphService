@@ -311,6 +311,8 @@ async def langgraph_agent_endpoint(
         sequence = 0
         active_by_tool_call: dict[str, dict[str, Any]] = {}
         active_models: list[dict[str, Any]] = []
+        final_message_id: str | None = None
+        final_message_parts: list[str] = []
 
         def timestamp_ms() -> int:
             """获取当前 Unix 毫秒时间戳。
@@ -398,6 +400,25 @@ async def langgraph_agent_endpoint(
         snapshot_sent = False
         async for event in request_agent.run(normalized_input):
             event_type = getattr(event, "type", None)
+            # adapter 以 message_id 标识本轮 assistant 消息；保留最后一条消息的
+            # 文本增量，供 RUN_FINISHED.result 返回同一最终结论。
+            if event_type == EventType.TEXT_MESSAGE_START and getattr(event, "role", None) == "assistant":
+                final_message_id = getattr(event, "message_id", None)
+                final_message_parts = []
+            elif event_type == EventType.TEXT_MESSAGE_CONTENT and getattr(event, "message_id", None) == final_message_id:
+                final_message_parts.append(str(getattr(event, "delta", "")))
+            elif event_type == EventType.TEXT_MESSAGE_END and getattr(event, "message_id", None) == final_message_id:
+                pass
+            elif event_type == EventType.MESSAGES_SNAPSHOT:
+                assistant_messages = [
+                    message for message in (getattr(event, "messages", None) or [])
+                    if getattr(message, "role", None) == "assistant"
+                    and getattr(message, "subagent_run_id", None) is None
+                ]
+                if assistant_messages:
+                    message = assistant_messages[-1]
+                    final_message_id = getattr(message, "id", final_message_id)
+                    final_message_parts = [str(getattr(message, "content", "") or "")]
             if event_type == EventType.RUN_STARTED:
                 yield encoder.encode(event)
                 if not snapshot_sent:
@@ -439,6 +460,11 @@ async def langgraph_agent_endpoint(
                 outcome = getattr(event, "outcome", None)
                 interrupted = getattr(outcome, "type", None) == "interrupt"
                 final_status = "failed" if event_type == EventType.RUN_ERROR else "awaiting_approval" if interrupted else "completed"
+                if event_type == EventType.RUN_FINISHED:
+                    # interrupt 代表运行暂停，不应把此前模型文本标成最终成功结论。
+                    if not interrupted and final_message_parts:
+                        event.result = "".join(final_message_parts)
+                    event.timestamp = event.timestamp or timestamp_ms()
                 if interrupted:
                     approvals = getattr(outcome, "interrupts", []) or []
                     for interruption in approvals:

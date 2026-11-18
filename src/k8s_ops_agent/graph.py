@@ -10,6 +10,7 @@ from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks.manager import AsyncCallbackManager
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 
@@ -112,7 +113,11 @@ async def _execute_approval_tool(
         },
     }
     async with operation_observation("approval.request", {"tool": tool.name}):
-        return await tool.ainvoke(call.get("args", {}), config=tool_config)
+        return await tool.ainvoke(
+            call.get("args", {}),
+            config=tool_config,
+            tool_call_id=call["id"],
+        )
 
 
 async def _execute_mcp_tool(
@@ -171,7 +176,11 @@ async def _execute_mcp_tool(
         async with operation_observation(
             "mcp.tool", {"mcp_server": server_name, "tool": name}
         ) as observation:
-            output = await tool.ainvoke(call.get("args", {}))
+            output = await tool.ainvoke(
+                call.get("args", {}),
+                config=config,
+                tool_call_id=call["id"],
+            )
             is_error = isinstance(output, dict) and output.get(
                 "isError", output.get("is_error", False)
             )
@@ -207,6 +216,29 @@ async def _execute_mcp_tool(
             extra={"log_type": "exception", "mcp_server": server_name, "tool": name},
         )
         return f"Tool call failed ({type(exc).__name__}): {exc}", [], True
+
+
+async def _emit_tool_result_callback(
+    tool: Any, call: dict[str, Any], message: ToolMessage, config: RunnableConfig
+) -> None:
+    """为合成或被策略拦截的工具结果触发 LangChain 工具结束回调。
+
+    参数：
+        tool: 对应的 LangChain 工具对象。
+        call: 模型生成的工具调用。
+        message: 已规范化并关联工具调用 ID 的结果消息。
+        config: 当前 LangGraph 运行配置，用于向 AG-UI adapter 传播回调。
+    返回值：无。
+    """
+    callback_manager = AsyncCallbackManager.configure(config.get("callbacks"))
+    run_manager = await callback_manager.on_tool_start(
+        {"name": tool.name, "description": getattr(tool, "description", "")},
+        str(call.get("args", {})),
+        name=tool.name,
+        inputs=call.get("args", {}),
+        tool_call_id=call["id"],
+    )
+    await run_manager.on_tool_end(message, name=tool.name)
 
 
 async def assistant_node(
@@ -300,6 +332,11 @@ async def tools_node(
             call_messages = _tool_result_messages(
                 output, call["id"], is_error=is_error
             )
+        # 工具对象自身的 on_tool_end 输出是原始 MCP/业务结果，adapter 只接受
+        # ToolMessage；再次以规范化消息触发回调，确保结果事件携带匹配的 call ID。
+        if tool is not None:
+            for message in call_messages:
+                await _emit_tool_result_callback(tool, call, message, config)
         results.extend(call_messages)
     return {"messages": results, "workspace_files": workspace_files}
 
