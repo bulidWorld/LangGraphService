@@ -11,11 +11,7 @@ from typing import Any, AsyncGenerator
 from uuid import uuid4
 
 from ag_ui.core.types import RunAgentInput
-from ag_ui.core.events import (
-    ActivityDeltaEvent,
-    ActivitySnapshotEvent,
-    EventType,
-)
+from ag_ui.core.events import ActivityDeltaEvent, ActivitySnapshotEvent, EventType
 from ag_ui.encoder import EventEncoder
 from ag_ui_langgraph import LangGraphAgent
 from fastapi import FastAPI, HTTPException, Request
@@ -399,10 +395,19 @@ async def langgraph_agent_endpoint(
             operations.append({"op": "replace", "path": "/run/updatedAt", "value": now})
             return patch(operations)
 
-        yield encoder.encode(snapshot())
-
+        snapshot_sent = False
         async for event in request_agent.run(normalized_input):
             event_type = getattr(event, "type", None)
+            if event_type == EventType.RUN_STARTED:
+                yield encoder.encode(event)
+                if not snapshot_sent:
+                    yield encoder.encode(snapshot())
+                    snapshot_sent = True
+                continue
+            if event_type in (EventType.RUN_FINISHED, EventType.RUN_ERROR) and not snapshot_sent:
+                # 底层预生成事件分支可能在 RUN_STARTED 后直接结束；终态之前补发快照。
+                yield encoder.encode(snapshot())
+                snapshot_sent = True
             if event_type == EventType.STEP_STARTED and event.step_name == "assistant":
                 item, delta = add_activity("model_inference", "大模型回复")
                 active_models.append(item)
