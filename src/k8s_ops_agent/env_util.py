@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -23,3 +24,15 @@ def get_service_name() -> str:
 
     name = metadata.get("name") if isinstance(metadata, dict) else None
     return name.strip() if isinstance(name, str) and name.strip() else "k8s_ops_agent"
+
+
+def _workspace_path(thread_id: str) -> Path:
+    """根据会话标识计算受限的 workspace 路径。
+
+    参数：
+        thread_id: 当前 LangGraph 会话标识。
+    返回值：当前会话 workspace 的绝对路径。
+    """
+    safe_service = re.sub(r"[^A-Za-z0-9._-]", "_", get_service_name()).strip("._") or "k8s_ops_agent"
+    safe_thread_id = re.sub(r"[^A-Za-z0-9._-]", "_", thread_id).strip("._") or "unknown"
+    return Path("/var/service") / safe_service / "share/workspace" / safe_thread_id

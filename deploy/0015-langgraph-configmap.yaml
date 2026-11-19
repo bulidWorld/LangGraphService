@@ -17,13 +17,3 @@ data:
   CONTEXT_WINDOW_TOKENS: "128000"
   CONTEXT_KEEP_RECENT_MESSAGES: "12"
   CONTEXT_COMPRESSION_FALLBACK_TURNS: "200"
-  MCP_SERVERS_CONFIG: |
-    {
-      "operator-agent-service": {
-        "transport": "streamable_http",
-        "url": "http://operator-agent-service.monitoring.svc.cluster.local/api/mcp",
-        "headers": {
-          "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
-        }
-      }
-    }

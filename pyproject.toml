@@ -18,7 +18,10 @@ dependencies = [
   "langgraph>=0.6.0",
   "langgraph-checkpoint-postgres>=2.0.0",
   "langfuse>=3.0.0",
+  "jsonschema>=4.20.0",
+  "PyYAML>=6.0.0",
   "psycopg[binary,pool]>=3.2.0",
+  "rapidfuzz>=3.9.0",
   "uvicorn[standard]>=0.30.0",
 ]
 

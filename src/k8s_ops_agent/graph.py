@@ -24,6 +24,8 @@ from k8s_ops_agent.observability import (
     update_observation,
 )
 from k8s_ops_agent.prompts import prepare_prompt_messages
+from k8s_ops_agent.read_tool import read_file
+from k8s_ops_agent.search_tool import search_file_content
 from k8s_ops_agent.workspace_resources import save_embedded_text_resources
 
 
@@ -182,8 +184,8 @@ async def _execute_mcp_tool(
                 server_name=server_name,
                 tool_name=name,
                 tool_arguments=call.get("args", {}),
-                approval_role=security.get("approvalRole"),
-                inputs=policy["approval"]["inputs"],
+                presentation=policy["presentation"],
+                execution=policy["execution"],
             )
         if decision.get("status") != "approved":
             return (
@@ -258,7 +260,11 @@ async def assistant_node(
     """
     # 每轮模型调用时发现 MCP 工具，确保使用当前配置的服务；串行调用工具以保持
     # 排查证据的先后顺序。
-    tools = list((await get_operational_tool_map()).values()) + [request_human_approval]
+    tools = list((await get_operational_tool_map()).values()) + [
+        request_human_approval,
+        read_file,
+        search_file_content,
+    ]
     model = _model().bind_tools(tools, parallel_tool_calls=False)
     messages = state["context_messages"]
     started = time.perf_counter()
@@ -313,6 +319,8 @@ async def tools_node(
 
     tool_map = await get_operational_tool_map()
     tool_map[request_human_approval.name] = request_human_approval
+    tool_map[read_file.name] = read_file
+    tool_map[search_file_content.name] = search_file_content
     results: list[ToolMessage] = []
     workspace_files = list(state.get("workspace_files", []))
     for call in last_message.tool_calls:
@@ -325,6 +333,12 @@ async def tools_node(
             # LangGraph 中断属于流程控制，不是工具异常；让中断向外传播，服务才能
             # 暂停执行并等待人工审批。
             output = await _execute_approval_tool(tool, call, config)
+            call_messages = _tool_result_messages(output, call["id"])
+        elif name in {read_file.name, search_file_content.name}:
+            output = await tool.ainvoke(
+                {"type": "tool_call", **call},
+                config=config,
+            )
             call_messages = _tool_result_messages(output, call["id"])
         else:
             # MCP 工具结果统一规范化，但根据 CallToolResult 的错误、内容块和结构化

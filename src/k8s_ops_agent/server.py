@@ -23,7 +23,6 @@ from psycopg_pool import AsyncConnectionPool
 
 from k8s_ops_agent.approval_auth import (
     authenticated_reviewer,
-    authorize_approval_role,
     validate_approval_answers,
 )
 from k8s_ops_agent.approval_store import (
@@ -238,8 +237,6 @@ async def _validate_resume(
 
         reviewer = authenticated_reviewer(request)
         request_payload = approval.get("request_payload") or {}
-        if request_payload.get("mcp_server"):
-            authorize_approval_role(request, request_payload.get("approval_role"))
         if decision_status != "cancelled":
             validate_approval_answers(request_payload, answers)
 
@@ -311,6 +308,8 @@ async def langgraph_agent_endpoint(
         sequence = 0
         active_by_tool_call: dict[str, dict[str, Any]] = {}
         active_models: list[dict[str, Any]] = []
+        model_by_message_id: dict[str, dict[str, Any]] = {}
+        model_text_by_id: dict[str, list[str]] = {}
         final_message_id: str | None = None
         final_message_parts: list[str] = []
 
@@ -405,10 +404,27 @@ async def langgraph_agent_endpoint(
             if event_type == EventType.TEXT_MESSAGE_START and getattr(event, "role", None) == "assistant":
                 final_message_id = getattr(event, "message_id", None)
                 final_message_parts = []
+                if active_models and final_message_id:
+                    model_item = active_models[-1]
+                    model_by_message_id[final_message_id] = model_item
+                    model_text_by_id[model_item["id"]] = []
+                    yield encoder.encode(update_activity(model_item, {
+                        "correlation": {"messageId": final_message_id},
+                        "output": {"messageId": final_message_id, "text": ""},
+                    }))
             elif event_type == EventType.TEXT_MESSAGE_CONTENT and getattr(event, "message_id", None) == final_message_id:
-                final_message_parts.append(str(getattr(event, "delta", "")))
+                text_delta = str(getattr(event, "delta", ""))
+                final_message_parts.append(text_delta)
+                model_item = model_by_message_id.get(final_message_id or "")
+                if model_item:
+                    model_text_by_id.setdefault(model_item["id"], []).append(text_delta)
             elif event_type == EventType.TEXT_MESSAGE_END and getattr(event, "message_id", None) == final_message_id:
-                pass
+                model_item = model_by_message_id.get(final_message_id or "")
+                if model_item:
+                    full_text = "".join(model_text_by_id.get(model_item["id"], []))
+                    yield encoder.encode(update_activity(model_item, {
+                        "output": {"messageId": final_message_id, "text": full_text},
+                    }))
             elif event_type == EventType.MESSAGES_SNAPSHOT:
                 assistant_messages = [
                     message for message in (getattr(event, "messages", None) or [])
@@ -419,6 +435,14 @@ async def langgraph_agent_endpoint(
                     message = assistant_messages[-1]
                     final_message_id = getattr(message, "id", final_message_id)
                     final_message_parts = [str(getattr(message, "content", "") or "")]
+                    if active_models and final_message_id:
+                        model_item = active_models[-1]
+                        model_by_message_id[final_message_id] = model_item
+                        model_text_by_id[model_item["id"]] = final_message_parts.copy()
+                        yield encoder.encode(update_activity(model_item, {
+                            "correlation": {"messageId": final_message_id},
+                            "output": {"messageId": final_message_id, "text": final_message_parts[0]},
+                        }))
             if event_type == EventType.RUN_STARTED:
                 yield encoder.encode(event)
                 if not snapshot_sent:
@@ -437,10 +461,18 @@ async def langgraph_agent_endpoint(
                 if active_models:
                     item = active_models.pop()
                     now = iso_now()
-                    yield encoder.encode(update_activity(item, {"status": "completed", "finishedAt": now}))
+                    values: dict[str, Any] = {"status": "completed", "finishedAt": now}
+                    message_id = next((key for key, value in model_by_message_id.items() if value is item), None)
+                    if message_id:
+                        values["output"] = {
+                            "messageId": message_id,
+                            "text": "".join(model_text_by_id.get(item["id"], [])),
+                        }
+                    yield encoder.encode(update_activity(item, values))
             elif event_type == EventType.TOOL_CALL_START:
                 item, delta = add_activity("tool_execution", event.tool_call_name, {
                     "tool": {"name": event.tool_call_name},
+                    "correlation": {"toolCallId": event.tool_call_id},
                     "input": {},
                 })
                 active_by_tool_call[event.tool_call_id] = item

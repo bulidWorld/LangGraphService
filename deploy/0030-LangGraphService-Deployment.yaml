@@ -29,6 +29,10 @@ spec:
                 name: langgraph-service-env
             - secretRef:
                 name: langgraph-service-secrets
+          volumeMounts:
+            - name: langgraph-service-secrets
+              mountPath: /etc/langgraph-service/secrets
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /health
@@ -48,6 +52,10 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+      volumes:
+        - name: langgraph-service-secrets
+          secret:
+            secretName: langgraph-service-secrets
 ---
 apiVersion: v1
 kind: Service

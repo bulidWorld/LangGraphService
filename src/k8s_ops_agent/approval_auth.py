@@ -1,4 +1,4 @@
-"""校验审批人的身份、角色和结构化表单答案。"""
+"""校验审批人的身份和结构化表单答案。"""
 
 from __future__ import annotations
 
@@ -26,28 +26,6 @@ def authenticated_reviewer(request: Request) -> str:
                 return identity.strip()
 
     raise HTTPException(status_code=401, detail="Authenticated reviewer is required")
-
-
-def authorize_approval_role(request: Request, required_role: str | None) -> None:
-    """校验可信认证上下文是否包含审批请求要求的角色。
-
-    参数：
-        request: 当前 AG-UI 请求。
-        required_role: 审批元数据要求的角色；为空表示不限制角色。
-    返回值：角色满足时无返回；不满足时抛出 403。
-    """
-    if not required_role:
-        return
-    roles = getattr(request.state, "reviewer_roles", None)
-    principal = request.scope.get("user")
-    if roles is None and principal is not None:
-        roles = getattr(principal, "roles", None)
-    if isinstance(roles, str):
-        roles = [roles]
-    if not isinstance(roles, (list, tuple, set)) or required_role not in roles:
-        raise HTTPException(
-            status_code=403, detail="Reviewer lacks the required approval role"
-        )
 
 
 def validate_approval_answers(
@@ -81,7 +59,9 @@ def validate_approval_answers(
         value = answers[key]
         field_type = definition["type"]
         if field_type == "confirm":
-            valid = isinstance(value, bool)
+            valid = isinstance(value, bool) and (
+                definition.get("mustBeTrue") is not True or value is True
+            )
         elif field_type == "single_select":
             options = {option["value"] for option in definition["options"]}
             valid = isinstance(value, str) and value in options
@@ -95,7 +75,7 @@ def validate_approval_answers(
                 and (not required or bool(value))
             )
         elif field_type == "text":
-            maximum = definition.get("max_length", 2000)
+            maximum = definition.get("maxLength", 2000)
             valid = (
                 isinstance(value, str)
                 and len(value) <= maximum

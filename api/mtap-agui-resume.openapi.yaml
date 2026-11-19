@@ -1,0 +1,329 @@
+openapi: 3.1.0
+info:
+  title: MTAP V1.0 — AG-UI 审批恢复接口
+  version: 1.0.0
+  description: |-
+    本文档描述基于 AG-UI 1.0 RunAgentInput.resume 的 MTAP 审批恢复请求。
+    AG-UI 标准字段：threadId、runId、messages、resume[]、interruptId、status、payload 等。
+    MTAP 自定义字段：resume[].payload 内的 request_id、status、answers、comment。
+    本文档仅收紧「审批恢复」场景，不代表 AG-UI 任意中断恢复都必须使用 MTAP payload。
+    /agent 路径、HTTP 错误码和认证方式是本项目的部署约定，不是 AG-UI 固定要求。
+    不使用 approvalRole；仅验证请求方已经通过接口认证，无角色鉴权。
+  contact:
+    name: MTAP 设计维护者
+  license:
+    name: Internal specification
+servers:
+  - url: https://agent.example.com
+    description: 示例服务器地址，部署时替换
+
+tags:
+  - name: Agent Resume
+    description: 使用 AG-UI 标准 RunAgentInput 恢复审批暂停的 LangGraph 运行
+
+paths:
+  /agent:
+    post:
+      tags: [Agent Resume]
+      operationId: resumeAgentApproval
+      summary: 恢复等待 MTAP 人工审批的 Agent 运行
+      description: |-
+        前置条件：先前的运行以 RUN_FINISHED.outcome.type=interrupt 结束，
+        并在 outcome.interrupts[] 中返回需要答复的 Interrupt.id。
+        前端提交新的 runId，但 threadId 必须与暂停的会话相同。
+        批准/拒绝：resume[].status=resolved，payload 包含 MTAP ApprovalDecision。
+        取消：resume[].status=cancelled，必须省略 payload（MTAP 约束）。
+        服务端在调用 LangGraph Command(resume=...) 前，校验中断归属、待审状态、接口身份、
+        审批请求标识及 answers；再持久化审批决定并获取唯一恢复权。
+        前端不得传入审核人身份、时间或工具执行参数来覆盖服务端已保存的内容。
+        本操作通过 SSE 流式返回 AG-UI 事件，而不是同步返回一个审批结果 JSON。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: AG-UI RunAgentInput；本接口要求 resume 非空
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalResumeRunAgentInput'
+            examples:
+              approved:
+                summary: 批准，包含四种控件的答案
+                value:
+                  protocolVersion: '1.0'
+                  threadId: thread-123
+                  runId: run-457
+                  messages: []
+                  resume:
+                    - interruptId: interrupt-789
+                      status: resolved
+                      payload:
+                        request_id: approval-001
+                        status: approved
+                        answers:
+                          impact_confirmed: true
+                          restart_strategy: direct
+                          affected_services: [api, worker]
+                          review_note: 已确认影响
+                        comment: 同意执行
+              rejected:
+                summary: 拒绝，不要求填写批准时的必填控件
+                value:
+                  threadId: thread-123
+                  runId: run-458
+                  messages: []
+                  resume:
+                    - interruptId: interrupt-789
+                      status: resolved
+                      payload:
+                        request_id: approval-001
+                        status: rejected
+                        answers: {}
+                        comment: 当前时间不允许重启
+              cancelled:
+                summary: 取消，resume entry 不包含 payload
+                value:
+                  threadId: thread-123
+                  runId: run-459
+                  messages: []
+                  resume:
+                    - interruptId: interrupt-789
+                      status: cancelled
+      responses:
+        '200':
+          description: |-
+            HTTP 流建立成功。响应是 AG-UI SSE 事件流，例如 RUN_STARTED、
+            TEXT_MESSAGE_*、TOOL_CALL_*、RUN_FINISHED 或 RUN_ERROR。
+            HTTP 200 不等于工具执行成功；必须以流内的终止事件和执行状态判断。
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: 每个 SSE data 帧携带一个符合 AG-UI 定义的 JSON 事件
+              examples:
+                finished:
+                  summary: 恢复后成功结束的最简示例
+                  value: |-
+                    data: {"type":"RUN_STARTED","threadId":"thread-123","runId":"run-457"}
+
+                    data: {"type":"RUN_FINISHED","threadId":"thread-123","runId":"run-457","outcome":{"type":"success"}}
+
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        示例接口认证配置：通过 Bearer Token 验证调用者身份。
+        不做审批角色鉴权。部署时可替换为其他认证实现，
+        但必须从可信认证上下文获取审核人身份，不接受 payload 中自行声明的 reviewer。
+
+  schemas:
+    ApprovalResumeRunAgentInput:
+      type: object
+      description: |-
+        符合 AG-UI RunAgentInput 字段名称的审批恢复请求。AG-UI 标准只要求
+        threadId、runId、messages；此处额外要求 resume 非空，是 MTAP 恢复接口约束。
+        不可添加自定义顶层 approval 字段，应使用 resume[].payload。
+      required: [threadId, runId, messages, resume]
+      properties:
+        protocolVersion:
+          type: string
+          const: '1.0'
+          description: AG-UI 协议版本标识；可省略，若提交则必须为 1.0（本服务兼容范围）
+        threadId:
+          type: string
+          minLength: 1
+          description: AG-UI 标准；必须匹配先前被中断的 LangGraph 会话 thread_id
+        runId:
+          type: string
+          minLength: 1
+          description: AG-UI 标准；本次恢复产生的新 run ID，不能复用先前已结束的 runId
+        parentRunId:
+          type: string
+          description: AG-UI 标准可选字段；仅在确有父运行关系时填写，不要求写原审批 run ID
+        messages:
+          type: array
+          description: |-
+            AG-UI 标准必填对话消息列表；允许 []。
+            若传消息，须符合官方 AG-UI Message 联合类型；此文件不重复定义所有消息变体。
+          items:
+            type: object
+            description: AG-UI Message；具体字段应使用官方 schema.json 完整校验
+        state:
+          description: AG-UI 标准的可选状态（任意非 null JSON）；不是审批结果载体
+          not: {type: 'null'}
+        tools:
+          type: array
+          description: AG-UI 标准可选的客户端工具列表；不是 MCP tools/list 审批元数据
+          items: {type: object}
+        context:
+          type: array
+          description: AG-UI 标准可选的上下文条目
+          items:
+            type: object
+            required: [description, value]
+            properties:
+              description: {type: string}
+              value: {type: string}
+            additionalProperties: false
+        forwardedProps:
+          description: AG-UI 标准可选透传字段；禁止用旧式 forwardedProps.command.resume 代替本接口 resume
+          not: {type: 'null'}
+        resume:
+          type: array
+          minItems: 1
+          description: |-
+            AG-UI 标准 ResumeEntry 数组；每个 entry 对应上一次运行的一个 Interrupt.id。
+            一次恢复可能包含多个 entry；必须校验 ID 归属、无重复、与待处理列表匹配。
+          items:
+            $ref: '#/components/schemas/ApprovalResumeEntry'
+      additionalProperties: false
+
+    ApprovalResumeEntry:
+      description: |-
+        AG-UI ResumeEntry 的 MTAP 审批专用收紧版。
+        官方通用 ResumeEntry 的 payload 可以是任意非 null JSON；
+        这里仅允许 MTAP 决定对象或取消（无 payload）。
+      oneOf:
+        - $ref: '#/components/schemas/ResolvedApprovalEntry'
+        - $ref: '#/components/schemas/CancelledApprovalEntry'
+
+    ResolvedApprovalEntry:
+      type: object
+      description: AG-UI status=resolved；业务通过/拒绝由 payload.status 决定
+      required: [interruptId, status, payload]
+      properties:
+        interruptId:
+          type: string
+          minLength: 1
+          description: 必须精确匹配上次 RUN_FINISHED.outcome.interrupts[].id
+        status:
+          const: resolved
+          description: AG-UI 标准的恢复状态，表示该中断已答复，不表示业务批准
+        payload:
+          $ref: '#/components/schemas/ApprovalDecision'
+        metadata:
+          $ref: '#/components/schemas/ResumeMetadata'
+      additionalProperties: false
+
+    CancelledApprovalEntry:
+      type: object
+      description: |-
+        AG-UI status=cancelled；MTAP 要求省略 payload。
+        request_id 从服务端可信的 interrupt/checkpoint/审批记录关联获取。
+      required: [interruptId, status]
+      properties:
+        interruptId:
+          type: string
+          minLength: 1
+          description: 必须匹配待处理的中断 ID
+        status:
+          const: cancelled
+          description: AG-UI 标准的取消状态；表示放弃此次中断交互
+        metadata:
+          $ref: '#/components/schemas/ResumeMetadata'
+      additionalProperties: false
+
+    ResumeMetadata:
+      type: object
+      description: |-
+        AG-UI 标准开放元数据，允许业务路由/签名等信息；
+        不应把审批答案放到这里，答案只能放在 payload。
+        ag-ui 键由 AG-UI 协议保留，业务方不要自行写入。
+      additionalProperties: true
+
+    ApprovalDecision:
+      type: object
+      description: |-
+        MTAP V1 自定义的审批决定对象，不是 AG-UI 自带的独立类型。
+        服务端须对 answers 与已保存 ApprovalRequest.inputs 做动态校验。
+        只做接口认证；不做 approvalRole 授权，但不能相信客户端填写的 reviewer/decided_at。
+      required: [request_id, status, answers]
+      properties:
+        request_id:
+          type: string
+          minLength: 1
+          description: MTAP 审批请求 ID；必须与对应 interrupt 关联的 pending 审批单一致
+        status:
+          type: string
+          enum: [approved, rejected]
+          description: 业务审批结果；与外层 resolved/cancelled 不是同一个状态字段
+        answers:
+          type: object
+          description: |-
+            审批人填写的字段映射，键来自 ApprovalRequest.inputs[].key。
+            confirm -> boolean；single_select -> string；multi_select -> string[]；text -> string。
+            这里保留任意键以支持动态 MCP 表单；服务端按本次审批快照校验类型、
+            必填、mustBeTrue、候选 options、maxLength、未知键及唯一性。
+          additionalProperties: true
+        comment:
+          type: string
+          maxLength: 2000
+          description: 可选总体审批意见，与 answers.review_note 等具体表单项不同
+      additionalProperties: false
+      allOf:
+        - if:
+            properties:
+              status: {const: rejected}
+            required: [status]
+          then:
+            properties:
+              answers:
+                maxProperties: 0
+      examples:
+        - request_id: approval-001
+          status: approved
+          answers: {impact_confirmed: true, restart_strategy: direct}
+          comment: 同意执行
+
+    ErrorResponse:
+      type: object
+      description: |-
+        本项目 HTTP 握手/入参阶段的错误格式，不是 AG-UI 标准 SSE 事件。
+        如果 SSE 已开始，应通过符合 AG-UI 的 RUN_ERROR 报告运行错误。
+      required: [code, message]
+      properties:
+        code: {type: string, description: 稳定的机器错误码}
+        message: {type: string, description: 面向调用者的错误摘要}
+        details: {type: object, additionalProperties: true, description: 可选校验细节}
+      additionalProperties: false
+
+  responses:
+    BadRequest:
+      description: 无法解析 JSON 或请求结构异常
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unauthorized:
+      description: 缺失或无效的接口认证凭据，不涉及角色权限
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    NotFound:
+      description: 找不到关联的 thread、interrupt 或审批请求（也可出于安全考虑统一隐藏存在性）
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Conflict:
+      description: 中断已恢复、审批已终结、runId 冲突或重复恢复权占用
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unprocessable:
+      description: 表单 answers 与审批定义不符，或恢复状态与待处理中断不匹配
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}

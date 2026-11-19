@@ -74,8 +74,8 @@ async def request_mcp_tool_approval(
     server_name: str,
     tool_name: str,
     tool_arguments: dict[str, Any],
-    approval_role: str | None,
-    inputs: list[dict[str, Any]],
+    presentation: dict[str, Any],
+    execution: dict[str, Any],
 ) -> dict[str, Any]:
     """为 MCP 工具调用创建审批请求并等待人工决定。
 
@@ -86,24 +86,23 @@ async def request_mcp_tool_approval(
         server_name: 提供工具的 MCP 服务器名称。
         tool_name: MCP 工具名称。
         tool_arguments: 本次工具调用参数，仅保存到审批请求中供审核。
-        approval_role: MCP 元数据声明的审核角色。
-        inputs: 审批人需要填写的结构化表单定义。
+        presentation: MTAP schema 声明的审批标题、说明及表单字段。
+        execution: MTAP schema 声明的审批后执行语义。
     返回值：恢复后 LangGraph interrupt 收到的审批决定。
     """
-    _validate_input_definitions(inputs)
     request_payload = {
         "type": "approval_request",
         "schema_version": 1,
         "request_id": request_id,
         "action": tool_name,
-        "title": f"审批 MCP 工具调用：{tool_name}",
-        "rationale": f"MCP 服务器 {server_name} 发布的工具策略要求人工审批。",
+        "title": presentation["title"],
+        "rationale": presentation["description"],
         "change_plan": json.dumps(tool_arguments, ensure_ascii=False, default=str),
         "evidence": [],
-        "inputs": inputs,
+        "inputs": presentation["inputs"],
         "mcp_server": server_name,
         "tool_name": tool_name,
-        "approval_role": approval_role,
+        "execution": execution,
     }
     await create_approval_request(
         request_id=request_id,

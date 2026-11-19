@@ -1,22 +1,5 @@
-# MCP 注册工具规范
-- 每个工具必须提供扩展元数据：
-```
- "security": {
-    "riskLevel": "high",
-    "approvalMode": "conditional",
-    "approvalRole": "ops_admin",
-    "defaultAction": "require_approval"
-  }
+# MCP 工具设计入口
 
-完整内容：
-{
-  "serverId": "kubernetes-mcp",
-  "toolName": "restart_pod",
-  "security": {
-    "riskLevel": "high",
-    "approvalMode": "conditional",
-    "approvalRole": "ops_admin",
-    "defaultAction": "require_approval"
-  }
-}
-```
+MCP 工具安全元数据、审批模型、工具结果与校验规则统一维护于 [`design.md`](design.md) 的“[MCP 工具与审批设计](design.md#mcp-工具与审批设计)”章节。
+
+本文件仅保留导航，避免 MCP 工具规范与审批模型分开维护而出现冲突。新增或修改相关设计时，请直接编辑 `context/design.md` 的统一章节。

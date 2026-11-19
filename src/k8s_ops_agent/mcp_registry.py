@@ -14,12 +14,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+import yaml
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from k8s_ops_agent.approval import INPUT_TYPES, _validate_input_definitions
-
-MCP_CONFIG_PATH = Path.cwd() / "mcp_server.json"
+MCP_CONFIG_PATH = Path(os.getenv("MCP_SERVERS_CONFIG_FILE", "/etc/langgraph-service/secrets/MCP_SERVERS_CONFIG"))
+MCP_TOOL_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "context" / "mtap-tool.schema.yaml"
+APPROVAL_META_KEY = "com.zhiwenxia/approval"
 ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 logger = logging.getLogger("k8s_ops_agent")
 _TOOLS_CACHE_TTL_SECONDS = 10 * 60
@@ -51,17 +53,21 @@ def expand_env(value: Any) -> Any:
 
 @lru_cache(maxsize=1)
 def load_mcp_config() -> dict[str, Any]:
-    """从环境变量读取 MCP Server 配置。"""
+    """从 Kubernetes Secret 挂载文件读取 MCP Server 配置。
 
-    config_str = os.getenv("MCP_SERVERS_CONFIG")
+    参数：无。
+    返回值：展开环境变量占位符后的 MCP Server 配置对象。
+    """
+    if not MCP_CONFIG_PATH.is_file():
+        raise ValueError(f"MCP Server 配置文件不存在：{MCP_CONFIG_PATH}")
 
-    if not config_str:
-        raise ValueError("环境变量 MCP_SERVERS_CONFIG 未配置")
-
-    config = json.loads(config_str)
+    try:
+        config = json.loads(MCP_CONFIG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"MCP Server 配置文件不是有效 JSON：{MCP_CONFIG_PATH}") from exc
 
     if not isinstance(config, dict):
-        raise ValueError("MCP_SERVERS_CONFIG 必须是 JSON 对象")
+        raise ValueError("MCP Server 配置必须是 JSON 对象")
 
     return expand_env(config)
 
@@ -153,6 +159,8 @@ async def _discover_operational_tools() -> list[BaseTool]:
         )
         for tool in server_tools:
             tool.metadata = {**(tool.metadata or {}), "mcp_server": server_name}
+            # 注册阶段就拒绝不符合 MTAP 的工具，避免策略错误直到模型调用时才暴露。
+            get_tool_policy(tool)
         tools.extend(server_tools)
     return tools
 
@@ -174,78 +182,76 @@ async def get_operational_tool_map() -> dict[str, BaseTool]:
 
 
 def get_tool_policy(tool: BaseTool) -> dict[str, Any]:
-    """读取并校验 MCP 工具发布的审批策略和表单元数据。
+    """按 MTAP JSON Schema 校验并读取 MCP 工具审批定义。
 
     参数：
         tool: MCP 适配器生成的 LangChain 工具。
-    返回值：包含 security、approval 和 mcp_server 的策略对象。
+    返回值：包含 security、presentation、execution 和 mcp_server 的策略对象。
     """
     metadata = tool.metadata or {}
-    raw_meta = metadata.get("_meta", {})
-    raw_meta = raw_meta if isinstance(raw_meta, dict) else {}
-    security = raw_meta.get("security")
-    approval = raw_meta.get("approval", {})
-    if security is None:
-        security = {"approvalMode": "none"}
-    if not isinstance(security, dict):
-        raise ValueError(f"Invalid MCP security metadata for {tool.name!r}")
-
-    risk_level = security.get("riskLevel", "low")
-    approval_mode = security.get("approvalMode", "none")
-    default_action = security.get("defaultAction", "require_approval")
-    approval_role = security.get("approvalRole")
-    if risk_level not in {"low", "medium", "high", "critical"}:
-        raise ValueError(f"Invalid MCP riskLevel for {tool.name!r}")
-    if approval_mode not in {"none", "required", "conditional"}:
-        raise ValueError(f"Invalid MCP approvalMode for {tool.name!r}")
-    if default_action not in {"allow", "deny", "require_approval"}:
-        raise ValueError(f"Invalid MCP defaultAction for {tool.name!r}")
-    if approval_role is not None and (
-        not isinstance(approval_role, str) or not approval_role.strip()
-    ):
-        raise ValueError(f"Invalid MCP approvalRole for {tool.name!r}")
-    if approval_mode == "required" and not approval_role:
-        raise ValueError(f"MCP tool {tool.name!r} requires approvalRole")
-    if (
-        approval_mode == "conditional"
-        and default_action == "require_approval"
-        and not approval_role
-    ):
-        raise ValueError(
-            f"MCP tool {tool.name!r} requires approvalRole for its fallback"
-        )
-    if approval_mode == "none" and approval_role:
-        raise ValueError(
-            f"MCP tool {tool.name!r} cannot use approvalRole with approvalMode=none"
-        )
-    if not isinstance(approval, dict):
-        raise ValueError(f"Invalid MCP approval metadata for {tool.name!r}")
-
-    schema_version = approval.get("schema_version", 1)
-    input_policy = approval.get("inputPolicy", "fixed")
-    allowed_types = approval.get(
-        "allowedInputTypes", ["confirm", "single_select", "multi_select", "text"]
-    )
-    inputs = approval.get("inputs", [])
-    if schema_version != 1 or input_policy not in {"fixed", "model_assisted"}:
-        raise ValueError(f"Unsupported MCP approval schema for {tool.name!r}")
-    if not isinstance(allowed_types, list) or any(
-        item not in INPUT_TYPES for item in allowed_types
-    ):
-        raise ValueError(f"Invalid MCP allowedInputTypes for {tool.name!r}")
-    if not isinstance(inputs, list):
-        raise ValueError(f"Invalid MCP approval inputs for {tool.name!r}")
-    _validate_input_definitions(inputs)
-    if any(item["type"] not in allowed_types for item in inputs):
-        raise ValueError(f"MCP approval input type is not allowed for {tool.name!r}")
-    normalized_approval = {
-        "schema_version": schema_version,
-        "inputPolicy": input_policy,
-        "allowedInputTypes": allowed_types,
-        "inputs": inputs,
+    raw_meta = metadata.get("_meta")
+    if not isinstance(raw_meta, dict) or APPROVAL_META_KEY not in raw_meta:
+        raise ValueError(f"Missing MTAP approval metadata for {tool.name!r}")
+    input_schema = getattr(tool, "args_schema", None)
+    if hasattr(input_schema, "model_json_schema"):
+        input_schema = input_schema.model_json_schema()
+    elif not isinstance(input_schema, dict):
+        input_schema = {"type": "object"}
+    definition = {
+        "name": tool.name,
+        "description": getattr(tool, "description", "") or "",
+        "inputSchema": input_schema,
+        "_meta": {APPROVAL_META_KEY: raw_meta[APPROVAL_META_KEY]},
     }
+    try:
+        schema = _load_mcp_tool_schema()
+        jsonschema.Draft202012Validator(schema).validate(definition)
+        jsonschema.validators.validator_for(input_schema).check_schema(input_schema)
+        approval = raw_meta[APPROVAL_META_KEY]
+        _validate_approval_semantics(approval)
+    except (jsonschema.ValidationError, jsonschema.SchemaError, OSError, ValueError) as exc:
+        raise ValueError(f"Invalid MTAP metadata for MCP tool {tool.name!r}: {exc}") from exc
+
     return {
-        "security": security,
-        "approval": normalized_approval,
+        "security": approval["security"],
+        "presentation": approval.get("presentation"),
+        "execution": approval.get("execution"),
         "mcp_server": metadata.get("mcp_server", "unknown"),
     }
+
+
+def _validate_approval_semantics(approval: dict[str, Any]) -> None:
+    """补充校验 JSON Schema 无法表达的表单字段和值唯一性。
+
+    参数：
+        approval: MTAP 扩展命名空间中的审批定义。
+    返回值：语义校验通过时无返回；重复 key/value 时抛出 ValueError。
+    """
+    presentation = approval.get("presentation")
+    if not isinstance(presentation, dict):
+        return
+    keys: set[str] = set()
+    for field in presentation["inputs"]:
+        if field["key"] in keys:
+            raise ValueError(f"Duplicate approval input key: {field['key']!r}")
+        keys.add(field["key"])
+        values: set[str] = set()
+        for option in field.get("options", []):
+            if option["value"] in values:
+                raise ValueError(
+                    f"Duplicate option value for approval input {field['key']!r}"
+                )
+            values.add(option["value"])
+
+
+@lru_cache(maxsize=1)
+def _load_mcp_tool_schema() -> dict[str, Any]:
+    """读取并缓存 MTAP 工具 JSON Schema。
+
+    参数：无。
+    返回值：Draft 2020-12 格式的工具 schema。
+    """
+    with MCP_TOOL_SCHEMA_PATH.open(encoding="utf-8") as schema_file:
+        schema = yaml.safe_load(schema_file)
+    jsonschema.Draft202012Validator.check_schema(schema)
+    return schema
