@@ -309,6 +309,8 @@ class ContextCompressor:
                 model=self.model_name,
                 temperature=0,
                 max_tokens=1000,
+                use_responses_api=True,
+                reasoning={"effort": "medium", "summary": "auto"},
             )
         transcript = self._serialize_groups(groups)
         started = time.perf_counter()

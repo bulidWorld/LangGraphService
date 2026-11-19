@@ -41,9 +41,16 @@ context_compression_node = build_context_compression_node(prepare_prompt_message
 
 
 def _model() -> ChatOpenAI:
+    """创建启用推理摘要的主模型。
+
+    参数：无。
+    返回值：使用 Responses API 并请求自动推理摘要的模型实例。
+    """
     return ChatOpenAI(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
+        use_responses_api=True,
+        reasoning={"effort": "medium", "summary": "auto"},
     )
 
 

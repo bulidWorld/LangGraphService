@@ -75,12 +75,12 @@
 | `events` | 纯平铺事件数组，按 `sequence` 升序展示；不包含 `parentId` 或其他关系字段 |
 | `events[].id` | 事件实例的稳定唯一标识；更新同一事件时保持不变 |
 | `events[].sequence` | 在该时间线内单调递增的整数；事件追加后不得重排或复用 |
-| `events[].type` | 当前支持 `model_inference`、`tool_execution`、`system_step`、`approval`；未知类型由前端按通用时间线条目展示 |
+| `events[].type` | 当前支持 `model_inference`、`reasoning`、`tool_execution`、`system_step`、`approval`；未知类型由前端按通用时间线条目展示 |
 | `events[].title` | 前端展示的简短标题 |
 | `events[].status` | `queued`、`running`、`awaiting_approval`、`completed`、`failed`、`cancelled` 之一 |
 | `events[].startedAt`、`events[].updatedAt`、`events[].finishedAt` | 事件的 UTC 时间；运行中或排队中的事件 `finishedAt` 为 `null` |
 | `events[].tool` | 工具事件的描述，至少包括工具名称，可选 MCP server 名称 |
-| `events[].correlation` | 与 AG-UI 原始事件流的关联键。`tool_execution` 必须包含 `toolCallId`，对应 `TOOL_CALL_START` 和 `TOOL_CALL_RESULT` 的 `tool_call_id`；`model_inference` 必须包含 `messageId`，对应 `TEXT_MESSAGE_START`、`TEXT_MESSAGE_CONTENT`、`TEXT_MESSAGE_END` 的 `message_id` |
+| `events[].correlation` | 与 AG-UI 原始事件流的关联键。`tool_execution` 必须包含 `toolCallId`，对应 `TOOL_CALL_START` 和 `TOOL_CALL_RESULT` 的 `tool_call_id`；`model_inference` 必须包含 `messageId`，对应 `TEXT_MESSAGE_START`、`TEXT_MESSAGE_CONTENT`、`TEXT_MESSAGE_END` 的 `message_id`；`reasoning` 必须包含 `reasoningId`，对应模型流 reasoning 内容块的 `id` |
 | `events[].input` | 脱敏后的输入摘要。工具调用只放适合前端展示的参数；模型调用不放完整 prompt 或隐藏推理内容 |
 | `events[].output` | 模型面向用户的回复或工具结果。模型文本放 `text`，多模态块按顺序放 `content`；工具可包含 MCP `content`、`structuredContent` 和资源引用 |
 | `events[].error` | 事件失败时的安全错误摘要；成功或仍在运行时为 `null` |
@@ -94,6 +94,7 @@
 
 - `tool_execution.correlation.toolCallId` 保存工具调用 ID。它必须与对应的 `TOOL_CALL_START.tool_call_id` 和 `TOOL_CALL_RESULT.tool_call_id` 相同。收到 `TOOL_CALL_START` 时创建活动条目；收到匹配的 `TOOL_CALL_RESULT` 时更新该条目的 `output`、状态和结束时间。工具结果先于活动条目创建或缺少匹配 ID 时，不能错误地关联到其他工具调用。
 - `model_inference.correlation.messageId` 保存助手消息 ID，对应 `TEXT_MESSAGE_START.message_id`、`TEXT_MESSAGE_CONTENT.message_id` 和 `TEXT_MESSAGE_END.message_id`。一条模型活动可关联一条或多条助手消息时，每条消息必须有独立的 `messageId` 关联记录；当前 schema 描述单条消息关联。消息文本 delta 由客户端按 `messageId` 分组并按事件到达顺序拼接，直到对应的 `TEXT_MESSAGE_END`。客户端不得把不同 `messageId` 的 delta 合并。若活动 `output.text` 已由服务端提供完整文本，应以该字段作为快照内容；否则使用关联的文本事件重建。`output.messageId` 与 `correlation.messageId` 应一致，便于恢复快照后继续识别消息。
+- `reasoning.correlation.reasoningId` 保存模型流 reasoning 内容块的 ID。reasoning 活动独立于助手文本消息，因此没有 `TEXT_MESSAGE_*` 事件时也可创建；仅记录其生命周期和非敏感摘要元数据，禁止保存隐藏推理正文或 `encrypted_content`。
 - 文本消息事件可能在活动条目创建之前到达。客户端应暂存尚无关联条目的 delta，并在看到带相同 `messageId` 的活动条目后归并；收到活动快照时，则以快照关联键恢复分组。活动时间线仍只展示 `ACTIVITY_*` 数据，普通 AG-UI 消息事件用于消息 UI 和文本重建，不另行生成时间线条目。
 
 `context/activity.schema.yaml` 定义 `ACTIVITY_SNAPSHOT.content` 的 JSON Schema（YAML 编写）。它约束快照及活动条目结构；关联键是连接两类事件流的唯一约定，AG-UI 外层事件字段仍由 AG-UI 协议定义。
@@ -101,7 +102,7 @@
 #### 事件更新规则
 
 1. run 开始时发送一个完整快照，包含 `run.status=running` 和空的 `events` 数组。
-2. 模型调用开始时追加 `model_inference` 事件，状态为 `running`；面向用户的回复流到时更新该事件的 `output.text` 或 `output.content`，结束后将状态改为 `completed`。隐藏推理内容不进入活动数据。
+2. 模型调用开始时追加 `model_inference` 事件，状态为 `running`；面向用户的回复流到时更新该事件的 `output.text` 或 `output.content`，结束后将状态改为 `completed`。模型流出现 reasoning 内容块时，可独立追加 `reasoning` 事件，即使没有 `TEXT_MESSAGE_*` 事件；不得将隐藏推理正文或加密载荷写入活动数据。
 3. 每次工具实际开始执行时追加一个 `tool_execution` 事件，记录脱敏输入；工具返回后在同一事件写入完整规范化结果并设置终态。工具调用请求本身不代表工具已执行。
 4. 状态或内容改变时发送 `ACTIVITY_DELTA`，只包含对现有 content 可应用的 RFC 6902 操作；追加事件使用 `add`，更新字段使用 `replace` 或 `add`。数组项按 `sequence` 追加，不删除或重排既有事件。
 5. 模型或工具失败时，更新对应事件为 `failed` 并提供安全错误摘要。run 结束后设置 run 终态及 `finishedAt`。
