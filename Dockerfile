@@ -16,7 +16,7 @@ COPY entrypoint.sh ./entrypoint.sh
 
 # 使用国内 PyPI 镜像安装依赖，避免构建时拉取官方源超时。
 # 构建阶段不连接数据库；表结构同步由 entrypoint.sh 在容器启动时执行。
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ .
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple/ .
 
 EXPOSE 9090
 
