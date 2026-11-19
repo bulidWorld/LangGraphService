@@ -454,7 +454,7 @@ async def langgraph_agent_endpoint(
                 yield encoder.encode(snapshot())
                 snapshot_sent = True
             if event_type == EventType.STEP_STARTED and event.step_name == "assistant":
-                item, delta = add_activity("model_inference", "大模型回复")
+                item, delta = add_activity("model_inference", "推理")
                 active_models.append(item)
                 yield encoder.encode(delta)
             elif event_type == EventType.STEP_FINISHED and event.step_name == "assistant":

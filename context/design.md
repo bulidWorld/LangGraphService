@@ -26,7 +26,7 @@
       "id": "model-1",
       "sequence": 1,
       "type": "model_inference",
-      "title": "大模型回复",
+      "title": "推理",
       "status": "completed",
       "startedAt": "2026-11-17T10:00:00.100Z",
       "updatedAt": "2026-11-17T10:00:01.300Z",
