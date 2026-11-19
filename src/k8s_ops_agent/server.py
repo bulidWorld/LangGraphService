@@ -22,7 +22,6 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
 from k8s_ops_agent.approval_auth import (
-    authenticated_reviewer,
     validate_approval_answers,
 )
 from k8s_ops_agent.approval_store import (
@@ -144,21 +143,18 @@ async def _active_interrupts(graph: Any, thread_id: str) -> dict[str, object]:
 async def _validate_resume(
     input_data: RunAgentInput, request: Request
 ) -> RunAgentInput:
-    """校验并持久化 AG-UI 恢复决定，返回服务端规范化后的运行输入。
+    """校验并持久化 AG-UI 审批恢复决定，返回服务端规范化后的运行输入。
 
     参数：
         input_data: AG-UI 运行请求。
-        request: 当前 HTTP 请求，用于读取可信审核人身份和角色。
-    返回值：经审批校验并填入服务端决定信息的 AG-UI 运行请求。
+        request: 当前 HTTP 请求，用于读取图状态和审批记录。
+        返回值：经审批校验并填入服务端时间信息的 AG-UI 运行请求。
     """
     entries = input_data.resume or []
     if not entries:
         return input_data
-    if len(entries) != 1:
-        raise HTTPException(
-            status_code=422,
-            detail="This agent accepts one approval resume entry per run",
-        )
+    if len({entry.interrupt_id for entry in entries}) != len(entries):
+        raise HTTPException(status_code=422, detail="Duplicate resume interrupt ID")
 
     interrupts = await _active_interrupts(
         request.app.state.graph, input_data.thread_id
@@ -167,6 +163,7 @@ async def _validate_resume(
         raise HTTPException(status_code=409, detail="Thread has no active interrupt")
 
     normalized_entries = []
+    pending_decisions: list[tuple[str, dict[str, Any]]] = []
     for entry in entries:
         # 只接受当前 thread checkpoint 中存在的中断，避免跨 thread 或伪造 interrupt ID。
         raw_interrupt = interrupts.get(entry.interrupt_id)
@@ -175,7 +172,12 @@ async def _validate_resume(
                 status_code=409, detail="Resume entry is not an active approval"
             )
 
-        request_id = raw_interrupt.get("request_id")
+        metadata = raw_interrupt.get("metadata", {})
+        langgraph_metadata = metadata.get("langgraph", {}) if isinstance(metadata, dict) else {}
+        request_payload = langgraph_metadata.get("raw", {}) if isinstance(langgraph_metadata, dict) else {}
+        if not isinstance(request_payload, dict) or request_payload.get("type") != "approval_request":
+            raise HTTPException(status_code=409, detail="Active interrupt is not an MTAP approval")
+        request_id = request_payload.get("request_id")
         if not isinstance(request_id, str):
             raise HTTPException(
                 status_code=409, detail="Active interrupt has no approval request"
@@ -217,6 +219,10 @@ async def _validate_resume(
                 raise HTTPException(
                     status_code=422, detail="Approval answers must be an object"
                 )
+            if decision_status == "rejected" and answers:
+                raise HTTPException(status_code=422, detail="Rejected decision must not include answers")
+            if decision_status == "approved" and "answers" not in submitted:
+                raise HTTPException(status_code=422, detail="Approved decision requires answers")
             comment = submitted.get("comment")
             if comment is not None and (
                 not isinstance(comment, str) or len(comment) > 4000
@@ -236,9 +242,8 @@ async def _validate_resume(
                 detail="Approval request is missing or no longer pending",
             )
 
-        reviewer = authenticated_reviewer(request)
         request_payload = approval.get("request_payload") or {}
-        if decision_status != "cancelled":
+        if decision_status == "approved":
             validate_approval_answers(request_payload, answers)
 
         decision = {
@@ -247,25 +252,23 @@ async def _validate_resume(
             "status": decision_status,
             "answers": answers,
             "comment": comment,
-            "reviewer": reviewer,
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }
         # 一次写入终态和 run 占用权，防止并发请求重复审批或恢复同一中断。
-        recorded = await record_approval_resume(
-            request_id,
-            input_data.thread_id,
-            input_data.run_id,
-            decision,
-        )
-        if not recorded:
-            raise HTTPException(
-                status_code=409, detail="Approval was already decided or resumed"
-            )
+        pending_decisions.append((request_id, decision))
 
         if entry.status == "resolved":
             normalized_entries.append(entry.model_copy(update={"payload": decision}))
         else:
             normalized_entries.append(entry)
+    for request_id, decision in pending_decisions:
+        recorded = await record_approval_resume(
+            request_id, input_data.thread_id, input_data.run_id, decision
+        )
+        if not recorded:
+            raise HTTPException(
+                status_code=409, detail="Approval was already decided or resumed"
+            )
     return input_data.model_copy(update={"resume": normalized_entries})
 
 
@@ -492,18 +495,6 @@ async def langgraph_agent_endpoint(
                     if not interrupted and final_message_parts:
                         event.result = "".join(final_message_parts)
                     event.timestamp = event.timestamp or timestamp_ms()
-                if interrupted:
-                    approvals = getattr(outcome, "interrupts", []) or []
-                    for interruption in approvals:
-                        metadata = getattr(interruption, "metadata", None) or {}
-                        langgraph_metadata = metadata.get("langgraph") or {}
-                        raw_request = langgraph_metadata.get("raw") or {}
-                        item, delta = add_activity("approval", "等待审批", {
-                            "status": "awaiting_approval",
-                            "approval": {"requestId": raw_request.get("request_id"), "status": "awaiting_approval"},
-                        })
-                        item["finishedAt"] = None
-                        yield encoder.encode(delta)
                 for item in [*active_models, *active_by_tool_call.values(), *active_reasoning.values()]:
                     if item["status"] == "running":
                         terminal = "failed" if final_status == "failed" else "cancelled" if final_status == "completed" else "awaiting_approval"

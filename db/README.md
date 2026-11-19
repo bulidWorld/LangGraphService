@@ -13,7 +13,7 @@
 引用关系按项目规范使用 `ref-table`、`ref-col` 描述，不创建数据库外键。
 状态使用 `varchar` 保存，由应用层校验；不生成数据库 `CHECK` 约束。两个表的
 主键均为自增 `integer`。`approval_requests.request_id` 唯一标识审批请求，
-`decision` 保存通过 AG-UI 请求校验的审核决定，`resume_run_id` 防止其他 run 重复恢复。
+`decision` 保存通过 AG-UI 请求校验的审批决定，`reviewer` 字段为兼容历史结构保留且审批回传不写入审核人身份，`resume_run_id` 防止其他 run 重复恢复。
 
 AG-UI 对话消息和 LangGraph 流程状态由 Postgres checkpointer 存在 LangGraph
 管理的 checkpoint 表中，不在上述业务表重复保存。生产环境配置数据库后，服务启动时

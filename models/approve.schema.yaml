@@ -4,8 +4,7 @@ title: MTAP V1.0 — AG-UI 人工审批请求与中断事件 Schema
 description: >-
   定义 RUN_FINISHED.outcome.type=interrupt 中携带的 MTAP 审批请求，以及其
   LangGraph interrupt 元数据结构。AG-UI 事件及 interrupt 外层字段依照
-  api/mtap-agui-resume.openapi.yaml；此 Schema 聚焦 interrupt 内的审批业务载荷。
-  不验证事件与审批记录、恢复请求之间的数据库关联及运行时授权。
+  api/mtap-agui-resume.openapi.yaml；此 Schema 聚焦 interrupt 内的审批业务载荷
 type: object
 required: [type, timestamp, threadId, runId, outcome]
 properties:
@@ -154,7 +153,7 @@ $defs:
       inputs:
         type: array
         maxItems: 64
-        description: 动态审批表单定义；key 须唯一，答案按 OpenAPI ApprovalDecision.answers 提交。
+        description: 动态审批表单定义；key 须唯一；批准时答案按 OpenAPI ApprovalDecision.answers 提交，拒绝时无需答案。
         items:
           $ref: '#/$defs/approvalInput'
       mcp_server:

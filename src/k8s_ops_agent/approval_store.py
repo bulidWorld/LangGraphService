@@ -130,7 +130,7 @@ async def record_approval_resume(
         request_id: 审批请求 UUID。
         thread_id: 必须与请求所属 thread 相同。
         run_id: 当前 AG-UI run 标识。
-        decision: 已完成字段校验且包含审核人和决定时间的决定对象。
+        decision: 已完成字段校验并包含服务端决定时间的决定对象。
     返回值：决定保存且恢复权占用成功时返回 True。
     """
     if _pool is None:
@@ -144,7 +144,6 @@ async def record_approval_resume(
                 return False
             request["status"] = decision["status"]
             request["decision"] = decision
-            request["reviewer"] = decision["reviewer"]
             request["decided_at"] = decision["decided_at"]
             request["resume_run_id"] = run_id
             return True
@@ -153,13 +152,12 @@ async def record_approval_resume(
         async with connection.cursor() as cursor:
             await cursor.execute(
                 f"UPDATE {_APPROVAL_TABLE} SET status = %s, decision = %s, "
-                "reviewer = %s, decided_at = %s, resume_run_id = %s "
+                "decided_at = %s, resume_run_id = %s "
                 "WHERE request_id = %s AND thread_id = %s AND status = 'pending' "
                 "AND resume_run_id IS NULL",
                 (
                     decision["status"],
                     Jsonb(decision),
-                    decision["reviewer"],
                     decision["decided_at"],
                     run_id,
                     request_id,

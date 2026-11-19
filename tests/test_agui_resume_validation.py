@@ -15,13 +15,12 @@ from k8s_ops_agent.server import _validate_resume
 
 
 def _request() -> Request:
-    """创建包含可信审核人身份的最小 Starlette 请求。
+    """创建不依赖 reviewer 身份的最小 Starlette 请求。
 
     参数：无。
     返回值：测试用 HTTP 请求。
     """
     request = Request({"type": "http", "method": "POST", "path": "/agent", "headers": []})
-    request.state.reviewer_id = "reviewer-1"
     request.scope["app"] = SimpleNamespace(state=SimpleNamespace(graph=object()))
     return request
 
@@ -40,7 +39,7 @@ def _input(entry: dict, run_id: str = "new-run") -> RunAgentInput:
 
 
 class AguiResumeValidationTest(unittest.TestCase):
-    """验证恢复条目、审批答案、可信身份和一次性恢复权。"""
+    """验证恢复条目、审批答案和一次性恢复权。"""
 
     def test_empty_resume_passes_through_without_checkpoint_lookup(self) -> None:
         """普通新运行没有 resume 时不查询审批中断。
@@ -63,14 +62,14 @@ class AguiResumeValidationTest(unittest.TestCase):
             (_input({"interrupt_id": "i1", "status": "cancelled"}) .model_copy(update={
                 "resume": [
                     _input({"interrupt_id": "i1", "status": "cancelled"}).resume[0],
-                    _input({"interrupt_id": "i2", "status": "cancelled"}).resume[0],
+                    _input({"interrupt_id": "i1", "status": "cancelled"}).resume[0],
                 ]}), [], 422),
             (_input({"interrupt_id": "i1", "status": "cancelled"}), [], 409),
             (_input({"interrupt_id": "foreign", "status": "cancelled"}), ["i1"], 409),
         ]
         for data, active_ids, expected_status in cases:
             async def active_interrupts(*args):
-                return {key: {"request_id": "approval-1"} for key in active_ids}
+                return {key: {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}} for key in active_ids}
             with self.subTest(status=expected_status, active=active_ids), patch(
                 "k8s_ops_agent.server._active_interrupts", new=active_interrupts
             ), self.assertRaises(HTTPException) as raised:
@@ -78,7 +77,7 @@ class AguiResumeValidationTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, expected_status)
 
     def test_approved_decision_is_validated_and_server_fields_are_authoritative(self) -> None:
-        """答案通过校验后注入可信审核人和时间，并持久化恢复占用。
+        """答案通过校验后注入服务端时间，并持久化恢复占用。
 
         参数：无。
         返回值：无；客户端不能覆盖服务端决定元信息。
@@ -92,15 +91,15 @@ class AguiResumeValidationTest(unittest.TestCase):
         }}
         with (
             patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
-                "interrupt-1": {"request_id": "approval-1"}
+                "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
             })),
             patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
             patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,
         ):
             result = asyncio.run(_validate_resume(data, _request()))
         normalized = result.resume[0].payload
-        self.assertEqual(normalized["reviewer"], "reviewer-1")
         self.assertTrue(normalized["decided_at"])
+        self.assertNotIn("reviewer", normalized)
         self.assertEqual(normalized["answers"], {"confirm": True})
         self.assertEqual(normalized["thread_id"], "thread-1")
         record.assert_awaited_once()
@@ -117,13 +116,13 @@ class AguiResumeValidationTest(unittest.TestCase):
                 "request_id": "wrong", "status": "approved", "answers": {},
             }},
             {"interrupt_id": "interrupt-1", "status": "resolved", "payload": {
-                "request_id": "approval-1", "status": "approved", "answers": {}, "reviewer": "forged",
+                "request_id": "approval-1", "status": "approved", "answers": {}, "unexpected": "field",
             }},
         ]
         for entry in entries:
             with self.subTest(entry=entry), patch(
                 "k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
-                    "interrupt-1": {"request_id": "approval-1"}
+                    "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
                 })), patch(
                 "k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=base)
             ), self.assertRaises(HTTPException) as raised:
@@ -132,7 +131,7 @@ class AguiResumeValidationTest(unittest.TestCase):
 
         with (
             patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
-                "interrupt-1": {"request_id": "approval-1"}
+                "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
             })),
             patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=base)),
             patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=False)),
@@ -154,7 +153,7 @@ class AguiResumeValidationTest(unittest.TestCase):
             approval = {"thread_id": "thread-1", "status": "pending", "request_payload": {}}
             with (
                 patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
-                    "interrupt-1": {"request_id": "approval-1"}
+                    "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
                 })),
                 patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
                 patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,

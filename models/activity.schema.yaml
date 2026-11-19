@@ -23,7 +23,6 @@ properties:
         - $ref: '#/$defs/modelInference'
         - $ref: '#/$defs/reasoning'
         - $ref: '#/$defs/toolExecution'
-        - $ref: '#/$defs/approval'
 $defs:
   timestamp:
     type: string
@@ -215,28 +214,3 @@ $defs:
                       additionalProperties: true
                       description: 一项非敏感摘要元数据。
               - type: 'null'
-  approval:
-    description: 一次暂停执行并等待人工审批的活动。
-    allOf:
-      - $ref: '#/$defs/baseEvent'
-      - type: object
-        additionalProperties: true
-        required: [type, approval]
-        properties:
-          type:
-            const: approval
-            description: 固定为 approval，表示审批等待活动。
-          approval:
-            type: object
-            description: 审批请求的标识和当前状态；审批表单内容由 approval_request 协议定义。
-            additionalProperties: true
-            required: [requestId, status]
-            properties:
-              requestId:
-                description: 对应审批请求的标识；中断元数据未提供标识时为 null。
-                oneOf:
-                  - type: string
-                  - type: 'null'
-              status:
-                const: awaiting_approval
-                description: 当前审批状态；此事件创建时固定为 awaiting_approval。

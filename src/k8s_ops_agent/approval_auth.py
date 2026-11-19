@@ -1,37 +1,16 @@
-"""校验审批人的身份和结构化表单答案。"""
+"""校验结构化审批表单答案。"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import HTTPException, Request
-
-
-def authenticated_reviewer(request: Request) -> str:
-    """从可信认证上下文读取审核人标识。
-
-    参数：
-        request: 当前 AG-UI 请求。
-    返回值：审核人标识；缺少可信身份时抛出 401。
-    """
-    configured_id = getattr(request.state, "reviewer_id", None)
-    if isinstance(configured_id, str) and configured_id.strip():
-        return configured_id.strip()
-
-    principal = request.scope.get("user")
-    if principal is not None and getattr(principal, "is_authenticated", False):
-        for attribute in ("username", "display_name", "identity"):
-            identity = getattr(principal, attribute, None)
-            if isinstance(identity, str) and identity.strip():
-                return identity.strip()
-
-    raise HTTPException(status_code=401, detail="Authenticated reviewer is required")
+from fastapi import HTTPException
 
 
 def validate_approval_answers(
     request_payload: dict[str, Any], answers: dict[str, Any]
 ) -> None:
-    """依据审批请求声明的控件校验审核人答案。
+    """依据审批请求声明的控件校验批准决定中的表单答案。
 
     参数：
         request_payload: 已持久化的审批请求。
