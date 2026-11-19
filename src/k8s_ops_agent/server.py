@@ -88,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             name="k8s_ops_agent",
             graph=graph,
             description="Kubernetes incident investigation agent",
+            config={"recursion_limit": 100},
             # 前端按 AG-UI 标准从 RUN_FINISHED.outcome.interrupts 渲染审批框，
             # 并通过 RunAgentInput.resume 恢复执行；旧版 on_interrupt 自定义事件
             # 不包含标准 ResumeEntry 所需的完整中断信息。
@@ -308,8 +309,10 @@ async def langgraph_agent_endpoint(
         sequence = 0
         active_by_tool_call: dict[str, dict[str, Any]] = {}
         active_models: list[dict[str, Any]] = []
+        model_by_item_id: dict[str, dict[str, Any]] = {}
         model_by_message_id: dict[str, dict[str, Any]] = {}
         model_text_by_id: dict[str, list[str]] = {}
+        active_reasoning: dict[str, dict[str, Any]] = {}
         final_message_id: str | None = None
         final_message_parts: list[str] = []
 
@@ -404,13 +407,47 @@ async def langgraph_agent_endpoint(
             if event_type == EventType.TEXT_MESSAGE_START and getattr(event, "role", None) == "assistant":
                 final_message_id = getattr(event, "message_id", None)
                 final_message_parts = []
-                if active_models and final_message_id:
-                    model_item = active_models[-1]
+                model_item = active_models[-1] if active_models else None
+                if model_item is None:
+                    model_item, delta = add_activity("model_inference", "推理")
+                    active_models.append(model_item)
+                    yield encoder.encode(delta)
+                if final_message_id:
                     model_by_message_id[final_message_id] = model_item
+                    model_by_item_id[model_item["id"]] = model_item
                     model_text_by_id[model_item["id"]] = []
                     yield encoder.encode(update_activity(model_item, {
                         "correlation": {"messageId": final_message_id},
                         "output": {"messageId": final_message_id, "text": ""},
+                    }))
+            elif event_type == EventType.REASONING_MESSAGE_START:
+                reasoning_id = getattr(event, "message_id", None)
+                if reasoning_id:
+                    item, delta = add_activity("reasoning", "Thinking", {
+                        "correlation": {"reasoningId": reasoning_id},
+                    })
+                    active_reasoning[reasoning_id] = item
+                    yield encoder.encode(delta)
+            elif event_type == EventType.REASONING_MESSAGE_END:
+                reasoning_id = getattr(event, "message_id", None)
+                item = active_reasoning.pop(reasoning_id or "", None)
+                if item:
+                    yield encoder.encode(update_activity(item, {
+                        "status": "completed", "finishedAt": iso_now(),
+                    }))
+            elif event_type == EventType.REASONING_MESSAGE_CHUNK:
+                # chunk 可能是单条完整片段；只记录生命周期，不读取 delta 正文。
+                reasoning_id = getattr(event, "message_id", None)
+                if reasoning_id:
+                    item = active_reasoning.get(reasoning_id)
+                    if item is None:
+                        item, delta = add_activity("reasoning", "Thinking", {
+                            "correlation": {"reasoningId": reasoning_id},
+                        })
+                        active_reasoning[reasoning_id] = item
+                        yield encoder.encode(delta)
+                    yield encoder.encode(update_activity(item, {
+                        "status": "completed", "finishedAt": iso_now(),
                     }))
             elif event_type == EventType.TEXT_MESSAGE_CONTENT and getattr(event, "message_id", None) == final_message_id:
                 text_delta = str(getattr(event, "delta", ""))
@@ -422,9 +459,13 @@ async def langgraph_agent_endpoint(
                 model_item = model_by_message_id.get(final_message_id or "")
                 if model_item:
                     full_text = "".join(model_text_by_id.get(model_item["id"], []))
+                    now = iso_now()
                     yield encoder.encode(update_activity(model_item, {
+                        "status": "completed", "finishedAt": now,
                         "output": {"messageId": final_message_id, "text": full_text},
                     }))
+                    if model_item in active_models:
+                        active_models.remove(model_item)
             elif event_type == EventType.MESSAGES_SNAPSHOT:
                 assistant_messages = [
                     message for message in (getattr(event, "messages", None) or [])
@@ -438,6 +479,7 @@ async def langgraph_agent_endpoint(
                     if active_models and final_message_id:
                         model_item = active_models[-1]
                         model_by_message_id[final_message_id] = model_item
+                        model_by_item_id[model_item["id"]] = model_item
                         model_text_by_id[model_item["id"]] = final_message_parts.copy()
                         yield encoder.encode(update_activity(model_item, {
                             "correlation": {"messageId": final_message_id},
@@ -454,20 +496,19 @@ async def langgraph_agent_endpoint(
                 yield encoder.encode(snapshot())
                 snapshot_sent = True
             if event_type == EventType.STEP_STARTED and event.step_name == "assistant":
-                item, delta = add_activity("model_inference", "推理")
-                active_models.append(item)
-                yield encoder.encode(delta)
+                # 工具调用轮次可能没有 TEXT_MESSAGE_*；先建立模型活动作为回退。
+                if not active_models:
+                    item, delta = add_activity("model_inference", "agent回复")
+                    active_models.append(item)
+                    yield encoder.encode(delta)
             elif event_type == EventType.STEP_FINISHED and event.step_name == "assistant":
-                if active_models:
-                    item = active_models.pop()
+                # 有 TEXT_MESSAGE_* 关联的活动由消息结束事件收尾；其余是工具调用轮次。
+                for item in list(active_models):
+                    if item["id"] in model_by_item_id:
+                        continue
+                    active_models.remove(item)
                     now = iso_now()
                     values: dict[str, Any] = {"status": "completed", "finishedAt": now}
-                    message_id = next((key for key, value in model_by_message_id.items() if value is item), None)
-                    if message_id:
-                        values["output"] = {
-                            "messageId": message_id,
-                            "text": "".join(model_text_by_id.get(item["id"], [])),
-                        }
                     yield encoder.encode(update_activity(item, values))
             elif event_type == EventType.TOOL_CALL_START:
                 item, delta = add_activity("tool_execution", event.tool_call_name, {
@@ -506,7 +547,7 @@ async def langgraph_agent_endpoint(
                         })
                         item["finishedAt"] = None
                         yield encoder.encode(delta)
-                for item in [*active_models, *active_by_tool_call.values()]:
+                for item in [*active_models, *active_by_tool_call.values(), *active_reasoning.values()]:
                     if item["status"] == "running":
                         terminal = "failed" if final_status == "failed" else "cancelled" if final_status == "completed" else "awaiting_approval"
                         yield encoder.encode(update_activity(item, {"status": terminal, "finishedAt": iso_now() if terminal != "awaiting_approval" else None}))
