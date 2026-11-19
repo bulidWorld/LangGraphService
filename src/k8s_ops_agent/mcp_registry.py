@@ -161,8 +161,19 @@ async def _discover_operational_tools() -> list[BaseTool]:
         for tool in server_tools:
             tool.metadata = {**(tool.metadata or {}), "mcp_server": server_name}
             # 注册阶段就拒绝不符合 MTAP 的工具，避免策略错误直到模型调用时才暴露。
-            get_tool_policy(tool)
-        tools.extend(server_tools)
+            try:
+                get_tool_policy(tool)
+            except ValueError:
+                logger.exception(
+                    "MCP 工具 MTAP 元数据校验失败，跳过该工具",
+                    extra={
+                        "log_type": "exception",
+                        "mcp_server": server_name,
+                        "tool_name": tool.name,
+                    },
+                )
+                continue
+            tools.append(tool)
     return tools
 
 
