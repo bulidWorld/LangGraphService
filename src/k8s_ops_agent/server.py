@@ -309,11 +309,9 @@ async def langgraph_agent_endpoint(
         sequence = 0
         active_by_tool_call: dict[str, dict[str, Any]] = {}
         active_models: list[dict[str, Any]] = []
-        model_by_item_id: dict[str, dict[str, Any]] = {}
-        model_by_message_id: dict[str, dict[str, Any]] = {}
-        model_text_by_id: dict[str, list[str]] = {}
+        active_model: dict[str, Any] | None = None
+        active_model_text: list[str] = []
         active_reasoning: dict[str, dict[str, Any]] = {}
-        final_message_id: str | None = None
         final_message_parts: list[str] = []
 
         def timestamp_ms() -> int:
@@ -402,24 +400,17 @@ async def langgraph_agent_endpoint(
         snapshot_sent = False
         async for event in request_agent.run(normalized_input):
             event_type = getattr(event, "type", None)
-            # adapter 以 message_id 标识本轮 assistant 消息；保留最后一条消息的
-            # 文本增量，供 RUN_FINISHED.result 返回同一最终结论。
+            # 保存最后一条 assistant 消息文本，供 RUN_FINISHED.result 返回。
             if event_type == EventType.TEXT_MESSAGE_START and getattr(event, "role", None) == "assistant":
-                final_message_id = getattr(event, "message_id", None)
+                message_id = event.message_id
                 final_message_parts = []
-                model_item = active_models[-1] if active_models else None
-                if model_item is None:
-                    model_item, delta = add_activity("model_inference", "推理")
-                    active_models.append(model_item)
-                    yield encoder.encode(delta)
-                if final_message_id:
-                    model_by_message_id[final_message_id] = model_item
-                    model_by_item_id[model_item["id"]] = model_item
-                    model_text_by_id[model_item["id"]] = []
-                    yield encoder.encode(update_activity(model_item, {
-                        "correlation": {"messageId": final_message_id},
-                        "output": {"messageId": final_message_id, "text": ""},
-                    }))
+                active_model_text = []
+                active_model, delta = add_activity("model_inference", "推理", {
+                    "correlation": {"messageId": message_id},
+                    "output": {"messageId": message_id, "text": ""},
+                })
+                active_models.append(active_model)
+                yield encoder.encode(delta)
             elif event_type == EventType.REASONING_MESSAGE_START:
                 reasoning_id = getattr(event, "message_id", None)
                 if reasoning_id:
@@ -449,42 +440,20 @@ async def langgraph_agent_endpoint(
                     yield encoder.encode(update_activity(item, {
                         "status": "completed", "finishedAt": iso_now(),
                     }))
-            elif event_type == EventType.TEXT_MESSAGE_CONTENT and getattr(event, "message_id", None) == final_message_id:
+            elif event_type == EventType.TEXT_MESSAGE_CONTENT and active_model:
                 text_delta = str(getattr(event, "delta", ""))
                 final_message_parts.append(text_delta)
-                model_item = model_by_message_id.get(final_message_id or "")
-                if model_item:
-                    model_text_by_id.setdefault(model_item["id"], []).append(text_delta)
-            elif event_type == EventType.TEXT_MESSAGE_END and getattr(event, "message_id", None) == final_message_id:
-                model_item = model_by_message_id.get(final_message_id or "")
-                if model_item:
-                    full_text = "".join(model_text_by_id.get(model_item["id"], []))
-                    now = iso_now()
-                    yield encoder.encode(update_activity(model_item, {
-                        "status": "completed", "finishedAt": now,
-                        "output": {"messageId": final_message_id, "text": full_text},
-                    }))
-                    if model_item in active_models:
-                        active_models.remove(model_item)
-            elif event_type == EventType.MESSAGES_SNAPSHOT:
-                assistant_messages = [
-                    message for message in (getattr(event, "messages", None) or [])
-                    if getattr(message, "role", None) == "assistant"
-                    and getattr(message, "subagent_run_id", None) is None
-                ]
-                if assistant_messages:
-                    message = assistant_messages[-1]
-                    final_message_id = getattr(message, "id", final_message_id)
-                    final_message_parts = [str(getattr(message, "content", "") or "")]
-                    if active_models and final_message_id:
-                        model_item = active_models[-1]
-                        model_by_message_id[final_message_id] = model_item
-                        model_by_item_id[model_item["id"]] = model_item
-                        model_text_by_id[model_item["id"]] = final_message_parts.copy()
-                        yield encoder.encode(update_activity(model_item, {
-                            "correlation": {"messageId": final_message_id},
-                            "output": {"messageId": final_message_id, "text": final_message_parts[0]},
-                        }))
+                active_model_text.append(text_delta)
+            elif event_type == EventType.TEXT_MESSAGE_END and active_model:
+                full_text = "".join(active_model_text)
+                message_id = active_model["correlation"]["messageId"]
+                yield encoder.encode(update_activity(active_model, {
+                    "status": "completed", "finishedAt": iso_now(),
+                    "output": {"messageId": message_id, "text": full_text},
+                }))
+                active_models.remove(active_model)
+                active_model = None
+                active_model_text = []
             if event_type == EventType.RUN_STARTED:
                 yield encoder.encode(event)
                 if not snapshot_sent:
@@ -495,22 +464,7 @@ async def langgraph_agent_endpoint(
                 # 底层预生成事件分支可能在 RUN_STARTED 后直接结束；终态之前补发快照。
                 yield encoder.encode(snapshot())
                 snapshot_sent = True
-            if event_type == EventType.STEP_STARTED and event.step_name == "assistant":
-                # 工具调用轮次可能没有 TEXT_MESSAGE_*；先建立模型活动作为回退。
-                if not active_models:
-                    item, delta = add_activity("model_inference", "agent回复")
-                    active_models.append(item)
-                    yield encoder.encode(delta)
-            elif event_type == EventType.STEP_FINISHED and event.step_name == "assistant":
-                # 有 TEXT_MESSAGE_* 关联的活动由消息结束事件收尾；其余是工具调用轮次。
-                for item in list(active_models):
-                    if item["id"] in model_by_item_id:
-                        continue
-                    active_models.remove(item)
-                    now = iso_now()
-                    values: dict[str, Any] = {"status": "completed", "finishedAt": now}
-                    yield encoder.encode(update_activity(item, values))
-            elif event_type == EventType.TOOL_CALL_START:
+            if event_type == EventType.TOOL_CALL_START:
                 item, delta = add_activity("tool_execution", event.tool_call_name, {
                     "tool": {"name": event.tool_call_name},
                     "correlation": {"toolCallId": event.tool_call_id},
@@ -541,9 +495,12 @@ async def langgraph_agent_endpoint(
                 if interrupted:
                     approvals = getattr(outcome, "interrupts", []) or []
                     for interruption in approvals:
+                        metadata = getattr(interruption, "metadata", None) or {}
+                        langgraph_metadata = metadata.get("langgraph") or {}
+                        raw_request = langgraph_metadata.get("raw") or {}
                         item, delta = add_activity("approval", "等待审批", {
                             "status": "awaiting_approval",
-                            "approval": {"requestId": (getattr(interruption, "metadata", None) or {}).get("requestId"), "status": "awaiting_approval"},
+                            "approval": {"requestId": raw_request.get("request_id"), "status": "awaiting_approval"},
                         })
                         item["finishedAt"] = None
                         yield encoder.encode(delta)
