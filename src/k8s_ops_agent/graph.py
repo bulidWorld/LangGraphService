@@ -14,7 +14,7 @@ from langchain_core.callbacks.manager import AsyncCallbackManager
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from k8s_ops_agent.approval import request_human_approval, request_mcp_tool_approval
+from k8s_ops_agent.approval import request_mcp_tool_approval
 from k8s_ops_agent.context_compression import build_context_compression_node
 from k8s_ops_agent.db_config import database_conninfo
 from k8s_ops_agent.mcp_registry import get_operational_tool_map, get_tool_policy
@@ -116,33 +116,6 @@ async def _emit_failed_tool_result(
         tool_call_id=call["id"],
     )
     await run_manager.on_tool_end(message, name=tool.name)
-
-
-async def _execute_approval_tool(
-    tool: Any, call: dict[str, Any], config: RunnableConfig
-) -> Any:
-    """执行人工审批工具并传入稳定的审批请求标识。
-
-    参数：
-        tool: 人工审批工具。
-        call: 模型生成的工具调用。
-        config: 当前 LangGraph 运行配置。
-    返回值：审批工具的执行结果。
-    """
-    thread_id = config.get("configurable", {}).get("thread_id", "")
-    request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"k8s_ops_agent:{thread_id}:{call['id']}"))
-    tool_config = {
-        **config,
-        "configurable": {
-            **config.get("configurable", {}),
-            "approval_request_id": request_id,
-        },
-    }
-    async with operation_observation("approval.request", {"tool": tool.name}):
-        return await tool.ainvoke(
-            {"type": "tool_call", **call},
-            config=tool_config,
-        )
 
 
 async def _execute_mcp_tool(
@@ -261,7 +234,6 @@ async def assistant_node(
     # 每轮模型调用时发现 MCP 工具，确保使用当前配置的服务；串行调用工具以保持
     # 排查证据的先后顺序。
     tools = list((await get_operational_tool_map()).values()) + [
-        request_human_approval,
         read_file,
         search_file_content,
     ]
@@ -318,7 +290,6 @@ async def tools_node(
         return {"messages": []}
 
     tool_map = await get_operational_tool_map()
-    tool_map[request_human_approval.name] = request_human_approval
     tool_map[read_file.name] = read_file
     tool_map[search_file_content.name] = search_file_content
     results: list[ToolMessage] = []
@@ -329,11 +300,6 @@ async def tools_node(
         if tool is None:
             output: Any = f"Tool {name!r} is not registered."
             call_messages = [ToolMessage(content=str(output), tool_call_id=call["id"])]
-        elif name == request_human_approval.name:
-            # LangGraph 中断属于流程控制，不是工具异常；让中断向外传播，服务才能
-            # 暂停执行并等待人工审批。
-            output = await _execute_approval_tool(tool, call, config)
-            call_messages = _tool_result_messages(output, call["id"])
         elif name in {read_file.name, search_file_content.name}:
             output = await tool.ainvoke(
                 {"type": "tool_call", **call},
