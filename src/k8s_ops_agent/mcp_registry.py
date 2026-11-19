@@ -146,7 +146,8 @@ async def _discover_operational_tools() -> list[BaseTool]:
                 "MCP 可用工具查询失败",
                 extra={"log_type": "exception", "mcp_server": server_name},
             )
-            raise
+            # 单个 MCP 服务不可用时跳过该服务，继续加载其余服务的工具。
+            continue
         logger.info(
             "MCP 可用工具查询结果",
             extra={
