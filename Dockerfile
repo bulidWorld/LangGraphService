@@ -9,7 +9,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY build_meta.json ./build_meta.json
 COPY src ./src
-COPY context ./context
+COPY models ./models
 COPY db ./db
 COPY scripts ./scripts
 COPY entrypoint.sh ./entrypoint.sh

@@ -20,7 +20,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 MCP_CONFIG_PATH = Path(os.getenv("MCP_SERVERS_CONFIG_FILE", "/etc/langgraph-service/secrets/MCP_SERVERS_CONFIG"))
-MCP_TOOL_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "context" / "mtap-tool.schema.yaml"
+MCP_TOOL_SCHEMA_PATH = Path(os.getenv("MCP_TOOL_SCHEMA_FILE", "/app/models/mtap-tool.schema.yaml"))
 APPROVAL_META_KEY = "com.zhiwenxia/approval"
 ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 logger = logging.getLogger("k8s_ops_agent")
