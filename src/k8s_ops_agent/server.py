@@ -168,6 +168,17 @@ async def _validate_resume(
         # 只接受当前 thread checkpoint 中存在的中断，避免跨 thread 或伪造 interrupt ID。
         raw_interrupt = interrupts.get(entry.interrupt_id)
         if not isinstance(raw_interrupt, dict):
+            logger.warning(
+                "Approval resume interrupt was not found in checkpoint",
+                extra={
+                    "log_type": "business",
+                    "thread_id": input_data.thread_id,
+                    "run_id": input_data.run_id,
+                    "interrupt_id": entry.interrupt_id,
+                    "active_interrupt_ids": list(interrupts),
+                    "checkpoint_value_type": type(raw_interrupt).__name__,
+                },
+            )
             raise HTTPException(
                 status_code=409, detail="Resume entry is not an active approval"
             )
@@ -176,6 +187,35 @@ async def _validate_resume(
         langgraph_metadata = metadata.get("langgraph", {}) if isinstance(metadata, dict) else {}
         request_payload = langgraph_metadata.get("raw", {}) if isinstance(langgraph_metadata, dict) else {}
         if not isinstance(request_payload, dict) or request_payload.get("type") != "approval_request":
+            logger.warning(
+                "Active interrupt does not match expected MTAP approval wrapper",
+                extra={
+                    "log_type": "business",
+                    "thread_id": input_data.thread_id,
+                    "run_id": input_data.run_id,
+                    "interrupt_id": entry.interrupt_id,
+                    "checkpoint_value_type": type(raw_interrupt).__name__,
+                    "checkpoint_value_keys": list(raw_interrupt),
+                    "metadata_type": type(metadata).__name__,
+                    "metadata_keys": list(metadata) if isinstance(metadata, dict) else [],
+                    "langgraph_metadata_type": type(langgraph_metadata).__name__,
+                    "langgraph_metadata_keys": (
+                        list(langgraph_metadata) if isinstance(langgraph_metadata, dict) else []
+                    ),
+                    "request_payload_type": type(request_payload).__name__,
+                    "request_payload_keys": (
+                        list(request_payload) if isinstance(request_payload, dict) else []
+                    ),
+                    "request_payload_type_value": (
+                        request_payload.get("type") if isinstance(request_payload, dict) else None
+                    ),
+                    "checkpoint_request_id": (
+                        request_payload.get("request_id")
+                        if isinstance(request_payload, dict)
+                        else None
+                    ),
+                },
+            )
             raise HTTPException(status_code=409, detail="Active interrupt is not an MTAP approval")
         request_id = request_payload.get("request_id")
         if not isinstance(request_id, str):

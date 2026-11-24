@@ -64,7 +64,7 @@ $defs:
           AG-UI 标准 ResumeEntry 数组；每个 entry 对应上一次运行的一个 Interrupt.id。
           支持一次恢复多个活动审批中断；interruptId 不得重复，且每个 ID 必须属于当前 thread 的活动审批中断。
         items:
-          $ref: '#/components/schemas/ApprovalResumeEntry'
+          $ref: '#/$defs/ApprovalResumeEntry'
     additionalProperties: false
 
   ApprovalResumeEntry:
@@ -73,8 +73,8 @@ $defs:
       官方通用 ResumeEntry 的 payload 可以是任意非 null JSON；
       这里仅允许 MTAP 决定对象或取消（无 payload）。
     oneOf:
-      - $ref: '#/components/schemas/ResolvedApprovalEntry'
-      - $ref: '#/components/schemas/CancelledApprovalEntry'
+      - $ref: '#/$defs/ResolvedApprovalEntry'
+      - $ref: '#/$defs/CancelledApprovalEntry'
 
   ResolvedApprovalEntry:
     type: object
@@ -89,9 +89,9 @@ $defs:
         const: resolved
         description: AG-UI 标准的恢复状态，表示该中断已答复，不表示业务批准
       payload:
-        $ref: '#/components/schemas/ApprovalDecision'
+        $ref: '#/$defs/ApprovalDecision'
       metadata:
-        $ref: '#/components/schemas/ResumeMetadata'
+        $ref: '#/$defs/ResumeMetadata'
     additionalProperties: false
 
   CancelledApprovalEntry:
@@ -109,7 +109,7 @@ $defs:
         const: cancelled
         description: AG-UI 标准的取消状态；表示放弃此次中断交互
       metadata:
-        $ref: '#/components/schemas/ResumeMetadata'
+        $ref: '#/$defs/ResumeMetadata'
     additionalProperties: false
 
   ResumeMetadata:
