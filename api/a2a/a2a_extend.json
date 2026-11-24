@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2a_extend.json",
+  "title": "Coding Agent A2A Extension",
+  "description": "Application-specific message payloads extending the base A2A schemas in a2a.json.",
+  "$defs": {
+    "CodingAgentTaskPayload": {
+      "allOf": [
+        {
+          "$ref": "./a2a.json#/$defs/Value"
+        },
+        {
+          "type": "object",
+          "description": "Task fields consumed from an A2A DataPart.data object. They may also be supplied as a JSON object in a text part; DataPart fields override same-named text JSON fields. Plain text is accepted as the task prompt.",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["chat", "coding"],
+              "default": "coding",
+              "description": "Selects the agent. If omitted, the service treats the request as coding."
+            },
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Git clone URL required for coding tasks."
+            },
+            "repo_url": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Alias for repository; required for coding tasks when repository is absent."
+            },
+            "branch": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Git branch required for coding tasks."
+            },
+            "instruction": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Task instruction; preferred prompt field."
+            },
+            "task": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Alias for instruction."
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Alias for instruction."
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Alias for instruction; commonly used by chat requests."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "type": {"const": "coding"}
+                },
+                "required": ["type"]
+              },
+              "then": {"$ref": "#/$defs/CodingRequirements"}
+            },
+            {
+              "if": {
+                "not": {"required": ["type"]}
+              },
+              "then": {"$ref": "#/$defs/CodingRequirements"}
+            }
+          ]
+        }
+      ]
+    },
+    "CodingRequirements": {
+      "type": "object",
+      "required": ["branch"],
+      "anyOf": [
+        {"required": ["repository"]},
+        {"required": ["repo_url"]}
+      ],
+      "description": "Coding requires a branch and either repository or repo_url."
+    },
+    "CodingAgentMessagePart": {
+      "allOf": [
+        {"$ref": "./a2a.json#/$defs/Part"},
+        {
+          "properties": {
+            "data": {"$ref": "#/$defs/CodingAgentTaskPayload"}
+          }
+        }
+      ]
+    },
+    "CodingAgentMessage": {
+      "allOf": [
+        {"$ref": "./a2a.json#/$defs/Message"},
+        {
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/CodingAgentMessagePart"}
+            }
+          }
+        }
+      ]
+    },
+    "CodingAgentSendMessageRequest": {
+      "allOf": [
+        {"$ref": "./a2a.json#/$defs/SendMessageRequest"},
+        {
+          "properties": {
+            "message": {"$ref": "#/$defs/CodingAgentMessage"}
+          }
+        }
+      ]
+    }
+  }
+}
