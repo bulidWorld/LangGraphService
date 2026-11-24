@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ag_ui_langgraph.interrupts import DEFAULT_RESUME_SENTINEL_CANCELLED
 from langgraph.types import interrupt
 
 from k8s_ops_agent.approval_store import create_approval_request
@@ -65,6 +66,12 @@ async def request_mcp_tool_approval(
         },
     )
     decision = interrupt(request_payload)
+    if (
+        isinstance(decision, dict)
+        and decision.get(DEFAULT_RESUME_SENTINEL_CANCELLED) is True
+    ):
+        # AG-UI 将取消恢复编码为哨兵对象；转换为审批业务状态供工具执行层处理。
+        decision = {"status": "cancelled"}
     logger.info(
         "MCP tool approval decision received",
         extra={"log_type": "business", "request_id": request_id,

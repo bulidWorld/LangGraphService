@@ -104,6 +104,74 @@ class AguiResumeValidationTest(unittest.TestCase):
         self.assertEqual(normalized["thread_id"], "thread-1")
         record.assert_awaited_once()
 
+    def test_actual_grafana_resume_request_is_accepted(self) -> None:
+        """验证用户提供的 Grafana 实际恢复请求与 checkpoint 审批载荷可以匹配。
+
+        参数：无。
+        返回值：无；实际请求未通过校验时断言失败。
+        """
+        data = RunAgentInput(
+            thread_id="17285793-8483-49c2-acf2-9e09a5194e59",
+            run_id="da92e7e1-f223-4bd8-92f1-0e3207da2634",
+            messages=[
+                {
+                    "id": "6b4bfdda-f94c-4edd-a588-fa6f9c9ff10a",
+                    "role": "user",
+                    "content": "重启 grafana-86b69b89d6-tpnw2",
+                }
+            ],
+            resume=[
+                {
+                    "interrupt_id": "22c0cf4985f16607ddd24abc6c779b03",
+                    "status": "resolved",
+                    "payload": {
+                        "request_id": "17cd99ab-b4c0-5d7b-9769-35e820888d85",
+                        "status": "approved",
+                        "answers": {"impact_confirmed": True},
+                    },
+                }
+            ],
+        )
+        checkpoint_payload = {
+            "type": "approval_request",
+            "schema_version": 1,
+            "request_id": "17cd99ab-b4c0-5d7b-9769-35e820888d85",
+            "action": "restart_pod",
+            "title": "重启 Grafana Pod",
+            "rationale": "按用户请求重启 Grafana Pod",
+            "change_plan": '{"namespace":"monitoring","pod":"grafana-86b69b89d6-tpnw2"}',
+            "evidence": [],
+            "inputs": [
+                {
+                    "key": "impact_confirmed",
+                    "type": "confirm",
+                    "required": True,
+                    "mustBeTrue": True,
+                }
+            ],
+            "mcp_server": "k8s-ops",
+            "tool_name": "restart_pod",
+            "execution": {},
+        }
+        approval = {
+            "thread_id": "17285793-8483-49c2-acf2-9e09a5194e59",
+            "status": "pending",
+            "request_payload": checkpoint_payload,
+        }
+
+        with (
+            patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+                "22c0cf4985f16607ddd24abc6c779b03": checkpoint_payload
+            })),
+            patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
+            patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,
+        ):
+            result = asyncio.run(_validate_resume(data, _request()))
+
+        self.assertEqual(result.resume[0].payload["request_id"], checkpoint_payload["request_id"])
+        self.assertEqual(result.resume[0].payload["status"], "approved")
+        self.assertEqual(record.await_args.args[0], checkpoint_payload["request_id"])
+
     def test_rejects_payload_tampering_pending_mismatch_and_duplicate_resume(self) -> None:
         """拒绝不匹配请求、未认证、无效答案及已被占用的审批。
 
