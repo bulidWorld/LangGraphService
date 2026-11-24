@@ -183,9 +183,22 @@ async def _validate_resume(
                 status_code=409, detail="Resume entry is not an active approval"
             )
 
-        metadata = raw_interrupt.get("metadata", {})
-        langgraph_metadata = metadata.get("langgraph", {}) if isinstance(metadata, dict) else {}
-        request_payload = langgraph_metadata.get("raw", {}) if isinstance(langgraph_metadata, dict) else {}
+        # LangGraph checkpoint 的 interrupt.value 通常直接保存 interrupt(request_payload) 的值；
+        # 部分 AG-UI 表示则会将该值包装在 metadata.langgraph.raw 中。两种形式都支持。
+        if raw_interrupt.get("type") == "approval_request":
+            request_payload = raw_interrupt
+            metadata: object = {}
+            langgraph_metadata: object = {}
+        else:
+            metadata = raw_interrupt.get("metadata", {})
+            langgraph_metadata = (
+                metadata.get("langgraph", {}) if isinstance(metadata, dict) else {}
+            )
+            request_payload = (
+                langgraph_metadata.get("raw", {})
+                if isinstance(langgraph_metadata, dict)
+                else {}
+            )
         if not isinstance(request_payload, dict) or request_payload.get("type") != "approval_request":
             logger.warning(
                 "Active interrupt does not match expected MTAP approval wrapper",
