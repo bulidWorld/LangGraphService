@@ -23,3 +23,20 @@
 - graph执行过程中，如果执行到的工具，定义为需要审批，则进入中断
 - 进入中断后返回中断数据模型[RUN FINISH Interupt 模型]
 - 用户对审批进行操作，基于AG-UI 返回审批模型[approve Decision 模型]
+
+#### 业务流 v2
+- 根据用户意图分析问题
+- 判断Pod是否故障
+- 如果是Pod故障，查询Pod信息
+- 根据Pod提供的信息，获取Pod的源码仓库
+- 把源码仓库发送给 a2a agent， 调用A接口
+- a2a agent 干活，分析问题
+- a2a agent 给出答案
+- 怎么保留 a2a agent的输出结果？作为tool message 吗？user message 吗？
+- a2a的答案分几种：
+  + 问题原因
+  + 修改方案
+- human in loop 同意a2a的方案，要求修改代码
+- 调用 B接口进行修改
+
+新增工具：查询pod的状态

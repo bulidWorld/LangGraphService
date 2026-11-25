@@ -1,0 +1,67 @@
+# Coding Agent Service A2A 1.0 JSON-RPC examples
+# Set these in your shell before running the commands:
+export A2A_URL=http://127.0.0.1:8000
+export A2A_API_TOKEN='replace-with-a-random-token-of-at-least-24-characters'
+export TASK_ID='task-id-returned-by-SendMessage'
+
+# Public Agent Card (no authentication)
+curl -sS "$A2A_URL/.well-known/agent-card.json"
+
+# GetExtendedAgentCard (Bearer token required)
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"extended-card-1","method":"GetExtendedAgentCard","params":{}}'
+
+# SendMessage: submit a repository bug-fix task; coding requires repository and branch.
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"send-1","method":"SendMessage","params":{"message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
+
+# SendStreamingMessage: submit a task and receive Server-Sent Events.
+curl -N -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"stream-1","method":"SendStreamingMessage","params":{"message":{"messageId":"message-stream-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
+
+# SendMessage: chat without a repository; response text is returned in the task artifact.
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"chat-1","method":"SendMessage","params":{"message":{"messageId":"message-chat-1","role":"ROLE_USER","parts":[{"data":{"type":"chat","message":"用简洁的中文解释什么是 Kubernetes Deployment。"}}]}}}'
+
+# GetTask: query task state/result (replace TASK_ID with a returned task id).
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"get-1\",\"method\":\"GetTask\",\"params\":{\"id\":\"$TASK_ID\"}}"
+
+# ListTasks: list tasks in the in-memory task store.
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"list-1","method":"ListTasks","params":{"pageSize":20,"includeArtifacts":true}}'
+
+# CancelTask: cancel an in-progress task.
+curl -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"cancel-1\",\"method\":\"CancelTask\",\"params\":{\"id\":\"$TASK_ID\"}}"
+
+# SubscribeToTask: resume receiving task events as Server-Sent Events.
+curl -N -sS "$A2A_URL/" \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -H "Authorization: Bearer $A2A_API_TOKEN" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"method\":\"SubscribeToTask\",\"params\":{\"id\":\"$TASK_ID\"}}"
+
+# Push-notification RPCs are omitted: api/agent-card.yaml does not enable
+# push_notifications, so the server correctly returns PushNotificationNotSupportedError.

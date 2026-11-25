@@ -21,6 +21,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
+from k8s_ops_agent.a2a_client.graph import A2A_PROGRESS_EVENT
 from k8s_ops_agent.approval_auth import (
     validate_approval_answers,
 )
@@ -93,8 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # 不包含标准 ResumeEntry 所需的完整中断信息。
             enable_legacy_on_interrupt_event=False,
             emit_interrupt_outcome=True,
-            # LangGraph 底层回调已由适配器转换为消息、工具、步骤和状态等
-            # AG-UI 原生事件；关闭 RAW 透传以避免重复事件和大体积内部状态。
+            # A2A 进度通过适配器的 RAW 回调入口进入下方的活动事件转换。
             emit_raw_events=True,
         )
         yield
@@ -152,6 +152,12 @@ async def _validate_resume(
     """
     entries = input_data.resume or []
     if not entries:
+        # 适配器兼容旧式恢复命令，但该入口会跳过 MTAP 的决定校验与持久化。
+        command = (input_data.forwarded_props or {}).get("command")
+        if isinstance(command, dict) and command.get("resume") is not None:
+            raise HTTPException(
+                status_code=422, detail="Approval resume must use RunAgentInput.resume"
+            )
         return input_data
     if len({entry.interrupt_id for entry in entries}) != len(entries):
         raise HTTPException(status_code=422, detail="Duplicate resume interrupt ID")
@@ -368,6 +374,7 @@ async def langgraph_agent_endpoint(
         active_model: dict[str, Any] | None = None
         active_model_text: list[str] = []
         active_reasoning: dict[str, dict[str, Any]] = {}
+        a2a_activity: dict[str, Any] | None = None
         final_message_parts: list[str] = []
 
         def timestamp_ms() -> int:
@@ -456,6 +463,43 @@ async def langgraph_agent_endpoint(
         snapshot_sent = False
         async for event in request_agent.run(normalized_input):
             event_type = getattr(event, "type", None)
+            if event_type == EventType.RAW:
+                raw = event.event
+                if (
+                    isinstance(raw, dict)
+                    and raw.get("event") == "on_custom_event"
+                    and raw.get("name") == A2A_PROGRESS_EVENT
+                ):
+                    progress = raw["data"]
+                    task_id = progress["taskId"]
+                    remote_state = progress["status"].get("state")
+                    status = {
+                        "TASK_STATE_COMPLETED": "completed",
+                        "TASK_STATE_FAILED": "failed",
+                        "TASK_STATE_CANCELED": "cancelled",
+                        "TASK_STATE_REJECTED": "rejected",
+                        "TASK_STATE_INPUT_REQUIRED": "awaiting_input",
+                        "TASK_STATE_AUTH_REQUIRED": "awaiting_auth",
+                    }.get(remote_state, "running")
+                    if not task_id and "message" in progress["update"]:
+                        status = "completed"
+                    values = {
+                        "correlation": {"taskId": task_id},
+                        "status": status,
+                        "output": progress,
+                        "finishedAt": iso_now() if status in {
+                            "completed", "failed", "cancelled", "rejected",
+                        } else None,
+                    }
+                    if not snapshot_sent:
+                        yield encoder.encode(snapshot())
+                        snapshot_sent = True
+                    if a2a_activity is None:
+                        a2a_activity, delta = add_activity("a2a_task", "远端任务", values)
+                    else:
+                        delta = update_activity(a2a_activity, values)
+                    yield encoder.encode(delta)
+                    continue
             # 保存最后一条 assistant 消息文本，供 RUN_FINISHED.result 返回。
             if event_type == EventType.TEXT_MESSAGE_START and getattr(event, "role", None) == "assistant":
                 message_id = event.message_id
@@ -548,6 +592,14 @@ async def langgraph_agent_endpoint(
                     if not interrupted and final_message_parts:
                         event.result = "".join(final_message_parts)
                     event.timestamp = event.timestamp or timestamp_ms()
+                if (
+                    final_status == "failed" and a2a_activity is not None
+                    and a2a_activity["status"] == "running"
+                ):
+                    yield encoder.encode(update_activity(a2a_activity, {
+                        "status": "failed", "finishedAt": iso_now(),
+                        "error": str(event.message),
+                    }))
                 for item in [*active_models, *active_by_tool_call.values(), *active_reasoning.values()]:
                     if item["status"] == "running":
                         terminal = "failed" if final_status == "failed" else "cancelled" if final_status == "completed" else "awaiting_approval"

@@ -17,3 +17,5 @@ data:
   CONTEXT_WINDOW_TOKENS: "128000"
   CONTEXT_KEEP_RECENT_MESSAGES: "12"
   CONTEXT_COMPRESSION_FALLBACK_TURNS: "200"
+  A2A_ENDPOINT: "http://coding-agent-service.coding-agent.svc.cluster.local:8000"
+  A2A_TIMEOUT_SECONDS: "60"
