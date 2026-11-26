@@ -18,6 +18,7 @@ import jsonschema
 import yaml
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from mcp.shared.exceptions import McpError
 
 MCP_CONFIG_PATH = Path(os.getenv("MCP_SERVERS_CONFIG_FILE", "/etc/langgraph-service/secrets/MCP_SERVERS_CONFIG"))
 MCP_TOOL_SCHEMA_PATH = Path(os.getenv("MCP_TOOL_SCHEMA_FILE", "/app/models/mtap-tool.schema.yaml"))
@@ -25,6 +26,7 @@ APPROVAL_META_KEY = "com.zhiwenxia/approval"
 ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 logger = logging.getLogger("k8s_ops_agent")
 _TOOLS_CACHE_TTL_SECONDS = 10 * 60
+_TOOLS_DISCOVERY_FAILURE_TTL_SECONDS = 15
 _tools_cache_lock = threading.Lock()
 _tools_cache: list[BaseTool] | None = None
 _tools_cache_expires_at = 0.0
@@ -108,7 +110,7 @@ async def get_operational_tools() -> list[BaseTool]:
         return list(await asyncio.shield(asyncio.wrap_future(refresh_future)))
 
     try:
-        tools = await _discover_operational_tools()
+        tools, discovery_failed = await _discover_operational_tools()
     except BaseException as exc:
         with _tools_cache_lock:
             if _tools_refresh_future is refresh_future:
@@ -118,21 +120,36 @@ async def get_operational_tools() -> list[BaseTool]:
 
     with _tools_cache_lock:
         _tools_cache = list(tools)
-        _tools_cache_expires_at = time.monotonic() + _TOOLS_CACHE_TTL_SECONDS
+        # 保留可用工具，并在服务恢复后尽快重新发现缺失的工具。
+        ttl = _TOOLS_DISCOVERY_FAILURE_TTL_SECONDS if discovery_failed else _TOOLS_CACHE_TTL_SECONDS
+        _tools_cache_expires_at = time.monotonic() + ttl
         if _tools_refresh_future is refresh_future:
             _tools_refresh_future = None
     refresh_future.set_result(list(tools))
     return list(tools)
 
 
-async def _discover_operational_tools() -> list[BaseTool]:
+def _is_session_terminated(exc: BaseException) -> bool:
+    """识别 MCP SDK 包装在异常组中的会话终止错误。
+
+    参数：
+        exc: 发现工具时捕获的异常或异常组。
+    返回值：任意子异常为 MCP 会话终止错误时返回 True。
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_session_terminated(nested) for nested in exc.exceptions)
+    return isinstance(exc, McpError) and exc.error.code == 32600 and exc.error.message == "Session terminated"
+
+
+async def _discover_operational_tools() -> tuple[list[BaseTool], bool]:
     """逐个 MCP 服务发现工具并记录查询过程。
 
     参数：无。
-    返回值：携带来源服务器名称的 LangChain 工具列表。
+    返回值：携带来源服务器名称的工具列表，以及是否有服务查询失败。
     """
     client = _client()
     tools: list[BaseTool] = []
+    discovery_failed = False
     # 按服务逐个发现工具，避免适配器合并结果后丢失工具来源。
     for server_name in client.connections:
         logger.info(
@@ -141,11 +158,13 @@ async def _discover_operational_tools() -> list[BaseTool]:
         )
         try:
             server_tools = await client.get_tools(server_name=server_name)
-        except Exception:
-            logger.exception(
-                "MCP 可用工具查询失败",
-                extra={"log_type": "exception", "mcp_server": server_name},
-            )
+        except Exception as exc:
+            discovery_failed = True
+            message = "MCP 可用工具查询失败"
+            if _is_session_terminated(exc):
+                # Streamable HTTP 客户端也会将端点 HTTP 404 转为此协议错误。
+                message += "：会话已终止，请检查 MCP 端点地址、部署版本及会话状态"
+            logger.exception(message, extra={"log_type": "exception", "mcp_server": server_name})
             # 单个 MCP 服务不可用时跳过该服务，继续加载其余服务的工具。
             continue
         logger.info(
@@ -174,7 +193,7 @@ async def _discover_operational_tools() -> list[BaseTool]:
                 )
                 continue
             tools.append(tool)
-    return tools
+    return tools, discovery_failed
 
 
 async def get_operational_tool_map() -> dict[str, BaseTool]:
