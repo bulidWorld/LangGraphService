@@ -16,6 +16,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from k8s_ops_agent import graph as agent_graph
+from k8s_ops_agent import tool_execution
 
 
 def _success_tool(value: str) -> str:
@@ -107,7 +108,7 @@ class ToolCallResultEventTest(unittest.TestCase):
 
         with (
             patch.object(agent_graph, "get_operational_tool_map", new=AsyncMock(return_value={tool.name: tool})),
-            patch.object(agent_graph, "get_tool_policy", return_value={
+            patch.object(tool_execution, "get_tool_policy", return_value={
                 "security": {"approvalMode": "none"},
                 "mcp_server": "unit-test",
                 "approval": {"inputs": []},

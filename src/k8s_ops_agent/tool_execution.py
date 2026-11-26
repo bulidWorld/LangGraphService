@@ -8,12 +8,16 @@ from typing import Any
 
 from langchain_core.callbacks.manager import AsyncCallbackManager
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.tool import ToolCall
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 
 from k8s_ops_agent.approve.mcp_tool import request_tool_approval
 from k8s_ops_agent.http_logging import payload_log_fields, response_log_fields
 from k8s_ops_agent.mcp_registry import get_tool_policy
 from k8s_ops_agent.observability import logger, operation_observation, update_observation
+from k8s_ops_agent.read_tool import read_file
+from k8s_ops_agent.search_tool import search_file_content
 from k8s_ops_agent.workspace_resources import save_embedded_text_resources
 
 
@@ -199,10 +203,10 @@ async def run_tool_call(
         return [ToolMessage(content=output, tool_call_id=call["id"])], []
     if name in {read_file.name, search_file_content.name}:
         output = await tool.ainvoke({"type": "tool_call", **call}, config=config)
-        return tool_result_messages(output, call["id"]), []
+        return _tool_result_messages(output, call["id"]), []
 
     policy = get_tool_policy(tool)
     output, new_files, is_error = await _execute_mcp_tool(tool, call, config, policy)
-    return tool_result_messages(output, call["id"], is_error=is_error), new_files
+    return _tool_result_messages(output, call["id"], is_error=is_error), new_files
 
 
