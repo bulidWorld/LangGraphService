@@ -23,6 +23,7 @@ from k8s_ops_agent.a2a_client.pod_parameters import extract_pod_parameters
 from k8s_ops_agent.approve.mcp_tool import request_tool_approval
 from k8s_ops_agent.approve.pod_handoff import request_pod_handoff_approval
 from k8s_ops_agent.context_compression import build_context_compression_node
+from k8s_ops_agent.http_logging import payload_log_fields, response_log_fields
 from k8s_ops_agent.mcp_registry import get_operational_tool_map, get_tool_policy
 from k8s_ops_agent.observability import (
     logger,
@@ -174,6 +175,8 @@ async def _execute_mcp_tool(
 
     server_name = policy["mcp_server"]
     started = time.perf_counter()
+    request_body_fields = payload_log_fields(call.get("args", {}))
+    response_body_fields: dict[str, Any] = {}
     try:
         async with operation_observation(
             "mcp.tool", {"mcp_server": server_name, "tool": name}
@@ -182,6 +185,7 @@ async def _execute_mcp_tool(
                 {"type": "tool_call", **call},
                 config=config,
             )
+            response_body_fields = response_log_fields(output)
             is_error = isinstance(output, dict) and output.get(
                 "isError", output.get("is_error", False)
             )
@@ -199,6 +203,7 @@ async def _execute_mcp_tool(
                 "path": f"mcp.servers/{server_name}/tools/{name}",
                 "mcp_server": server_name, "tool": name, "status": 200,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                **request_body_fields, **response_body_fields,
             },
         )
         return output, new_files, is_error
@@ -210,6 +215,7 @@ async def _execute_mcp_tool(
                 "path": f"mcp.servers/{server_name}/tools/{name}",
                 "mcp_server": server_name, "tool": name, "status": 500,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                **request_body_fields, **response_body_fields,
             },
         )
         logger.exception(
