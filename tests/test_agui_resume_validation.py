@@ -11,7 +11,7 @@ from ag_ui.core.types import RunAgentInput
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from k8s_ops_agent.server import _validate_resume
+from k8s_ops_agent.resume_validation import validate_resume
 
 
 def _request() -> Request:
@@ -47,8 +47,8 @@ class AguiResumeValidationTest(unittest.TestCase):
         参数：无。
         返回值：无；调用了恢复相关副作用时断言失败。
         """
-        with patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock()) as active:
-            result = asyncio.run(_validate_resume(_input_for_empty(), _request()))
+        with patch("k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock()) as active:
+            result = asyncio.run(validate_resume(_input_for_empty(), _request()))
         self.assertIs(result.resume, None)
         active.assert_not_awaited()
 
@@ -71,9 +71,9 @@ class AguiResumeValidationTest(unittest.TestCase):
             async def active_interrupts(*args):
                 return {key: {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}} for key in active_ids}
             with self.subTest(status=expected_status, active=active_ids), patch(
-                "k8s_ops_agent.server._active_interrupts", new=active_interrupts
+                "k8s_ops_agent.resume_validation._active_interrupts", new=active_interrupts
             ), self.assertRaises(HTTPException) as raised:
-                asyncio.run(_validate_resume(data, _request()))
+                asyncio.run(validate_resume(data, _request()))
             self.assertEqual(raised.exception.status_code, expected_status)
 
     def test_approved_decision_is_validated_and_server_fields_are_authoritative(self) -> None:
@@ -90,13 +90,13 @@ class AguiResumeValidationTest(unittest.TestCase):
             "inputs": [{"key": "confirm", "type": "confirm", "required": True}]
         }}
         with (
-            patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+            patch("k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock(return_value={
                 "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
             })),
-            patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
-            patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,
+            patch("k8s_ops_agent.resume_validation.get_approval_request", new=AsyncMock(return_value=approval)),
+            patch("k8s_ops_agent.resume_validation.record_approval_resume", new=AsyncMock(return_value=True)) as record,
         ):
-            result = asyncio.run(_validate_resume(data, _request()))
+            result = asyncio.run(validate_resume(data, _request()))
         normalized = result.resume[0].payload
         self.assertTrue(normalized["decided_at"])
         self.assertNotIn("reviewer", normalized)
@@ -160,13 +160,13 @@ class AguiResumeValidationTest(unittest.TestCase):
         }
 
         with (
-            patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+            patch("k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock(return_value={
                 "22c0cf4985f16607ddd24abc6c779b03": checkpoint_payload
             })),
-            patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
-            patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,
+            patch("k8s_ops_agent.resume_validation.get_approval_request", new=AsyncMock(return_value=approval)),
+            patch("k8s_ops_agent.resume_validation.record_approval_resume", new=AsyncMock(return_value=True)) as record,
         ):
-            result = asyncio.run(_validate_resume(data, _request()))
+            result = asyncio.run(validate_resume(data, _request()))
 
         self.assertEqual(result.resume[0].payload["request_id"], checkpoint_payload["request_id"])
         self.assertEqual(result.resume[0].payload["status"], "approved")
@@ -189,23 +189,23 @@ class AguiResumeValidationTest(unittest.TestCase):
         ]
         for entry in entries:
             with self.subTest(entry=entry), patch(
-                "k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+                "k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock(return_value={
                     "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
                 })), patch(
-                "k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=base)
+                "k8s_ops_agent.resume_validation.get_approval_request", new=AsyncMock(return_value=base)
             ), self.assertRaises(HTTPException) as raised:
-                asyncio.run(_validate_resume(_input(entry), _request()))
+                asyncio.run(validate_resume(_input(entry), _request()))
             self.assertIn(raised.exception.status_code, (409, 422))
 
         with (
-            patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+            patch("k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock(return_value={
                 "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
             })),
-            patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=base)),
-            patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=False)),
+            patch("k8s_ops_agent.resume_validation.get_approval_request", new=AsyncMock(return_value=base)),
+            patch("k8s_ops_agent.resume_validation.record_approval_resume", new=AsyncMock(return_value=False)),
             self.assertRaises(HTTPException) as raised,
         ):
-            asyncio.run(_validate_resume(_input({"interrupt_id": "interrupt-1", "status": "cancelled"}), _request()))
+            asyncio.run(validate_resume(_input({"interrupt_id": "interrupt-1", "status": "cancelled"}), _request()))
         self.assertEqual(raised.exception.status_code, 409)
 
     def test_cancelled_resume_uses_checkpoint_request_id_and_rejects_payload(self) -> None:
@@ -220,13 +220,13 @@ class AguiResumeValidationTest(unittest.TestCase):
                 entry["payload"] = payload
             approval = {"thread_id": "thread-1", "status": "pending", "request_payload": {}}
             with (
-                patch("k8s_ops_agent.server._active_interrupts", new=AsyncMock(return_value={
+                patch("k8s_ops_agent.resume_validation._active_interrupts", new=AsyncMock(return_value={
                     "interrupt-1": {"metadata": {"langgraph": {"raw": {"type": "approval_request", "request_id": "approval-1"}}}}
                 })),
-                patch("k8s_ops_agent.server.get_approval_request", new=AsyncMock(return_value=approval)),
-                patch("k8s_ops_agent.server.record_approval_resume", new=AsyncMock(return_value=True)) as record,
+                patch("k8s_ops_agent.resume_validation.get_approval_request", new=AsyncMock(return_value=approval)),
+                patch("k8s_ops_agent.resume_validation.record_approval_resume", new=AsyncMock(return_value=True)) as record,
             ):
-                result = await _validate_resume(_input(entry), _request())
+                result = await validate_resume(_input(entry), _request())
             return result, record
 
         result, record = asyncio.run(run_cancel())
