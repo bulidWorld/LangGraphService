@@ -71,7 +71,7 @@ class RawEventHandler:
 
 
 _STEP_ACTIVITY_TYPES = {
-    "route_turn": ("reasoning", "Thinking"),
+    "route_turn": ("mode_selection", "模式选择"),
     "assistant": ("reasoning", "Thinking"),
     "assess_pod": ("reasoning", "Thinking"),
     "finalize": ("model_summary", "模型总结"),
