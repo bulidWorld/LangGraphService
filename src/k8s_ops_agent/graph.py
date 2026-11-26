@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from functools import partial
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -17,7 +18,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command
 
-from k8s_ops_agent.a2a_client import A2ATaskState, build_a2a_task_graph
+from k8s_ops_agent.a2a_client import build_a2a_task_graph
 from k8s_ops_agent.a2a_client.pod_parameters import extract_pod_parameters
 from k8s_ops_agent.approve.mcp_tool import request_tool_approval
 from k8s_ops_agent.approve.pod_handoff import request_pod_handoff_approval
@@ -34,10 +35,11 @@ from k8s_ops_agent.prompts import (
 )
 from k8s_ops_agent.read_tool import read_file
 from k8s_ops_agent.search_tool import search_file_content
+from k8s_ops_agent.turn_routing import TurnRoutingState, route_turn
 from k8s_ops_agent.workspace_resources import save_embedded_text_resources
 
 
-class AgentState(MessagesState, A2ATaskState, total=False):
+class AgentState(TurnRoutingState, total=False):
     """保留原始消息并提供本轮模型输入视图的 LangGraph 状态。"""
 
     context_messages: list[BaseMessage]
@@ -448,13 +450,18 @@ def build_graph(*, checkpointer: Any = None):
     # 压缩节点只生成本轮模型输入视图，不覆盖 checkpoint 中的原始 messages。
     # 工具返回后重新计算视图，assistant 节点始终读取最新压缩结果。
     builder = StateGraph(AgentState)
+    builder.add_node(
+        "route_turn",
+        partial(route_turn, model_factory=_model),
+        destinations=("context_compression", "a2a"),
+    )
     builder.add_node("context_compression", context_compression_node)
     builder.add_node("assistant", assistant_node)
     builder.add_node("tools", tools_node)
     builder.add_node("assess_pod", assess_pod)
     builder.add_node("approve_pod_handoff", approve_pod_handoff)
     builder.add_node("a2a", build_a2a_task_graph())
-    builder.add_edge(START, "context_compression")
+    builder.add_edge(START, "route_turn")
     builder.add_edge("context_compression", "assistant")
     builder.add_conditional_edges(
         "assistant",
