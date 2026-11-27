@@ -112,10 +112,7 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
         } else None,
     }
     yield from state.ensure_snapshot()
-    if state.a2a_activity is None:
-        state.a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
-    else:
-        delta = state.update_activity(state.a2a_activity, values)
+    state.latest_a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
     yield delta
 
 
@@ -410,8 +407,9 @@ def _finish_run(
         interrupted 表示运行是否暂停等待审批，approval_activities_marked 表示已按审批请求更新工具活动。
     返回值：按远端任务、步骤、工具调用、运行的顺序产生相关增量事件。
     """
-    if status == "failed" and state.a2a_activity is not None and state.a2a_activity["status"] == "running":
-        yield state.update_activity(state.a2a_activity, {
+    latest_a2a_activity = state.latest_a2a_activity
+    if status == "failed" and latest_a2a_activity is not None and latest_a2a_activity["status"] == "running":
+        yield state.update_activity(latest_a2a_activity, {
             "status": "failed",
             "finishedAt": iso_now(),
             "error": error,
