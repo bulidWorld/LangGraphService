@@ -24,14 +24,31 @@ class EventHandler(Protocol):
         ...
 
 
+def _a2a_error_summary(message: Any) -> str | None:
+    """提取 A2A 状态消息中的安全错误摘要。
+
+    参数：message 为 A2A TaskStatus.message 对象或其他消息值。
+    返回值：最多 1000 字符的文本摘要；没有可用文本时返回 None。
+    """
+    if isinstance(message, str):
+        return message[:1000] or None
+    if not isinstance(message, dict):
+        return None
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return None
+    texts = [part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)]
+    return "\n".join(texts)[:1000] or None
+
+
 class RawEventHandler:
-    """将 A2A 进度转换为远端任务活动。"""
+    """过滤 A2A 进度的原始副本，其他 RAW 事件照常转发。"""
 
     def handle(self, event: Any, state: ActivityState) -> Iterator[BaseEvent]:
-        """处理 RAW 事件，普通 RAW 事件直接转发。
+        """过滤将由 CUSTOM 事件处理的 A2A 进度 RAW 副本。
 
         参数：event 为 RAW 事件，state 为本次运行的活动状态。
-        返回值：远端任务活动事件或原始 RAW 事件。
+            返回值：普通 RAW 事件；A2A 进度副本不产生输出。
         """
         raw = event.event
         if not (
@@ -42,33 +59,79 @@ class RawEventHandler:
             yield event
             return
 
-        progress = raw["data"]
-        task_id = progress["taskId"]
-        remote_state = progress["status"].get("state")
-        status = {
-            "TASK_STATE_COMPLETED": "completed",
-            "TASK_STATE_FAILED": "failed",
-            "TASK_STATE_CANCELED": "cancelled",
-            "TASK_STATE_REJECTED": "rejected",
-            "TASK_STATE_INPUT_REQUIRED": "awaiting_input",
-            "TASK_STATE_AUTH_REQUIRED": "awaiting_auth",
-        }.get(remote_state, "running")
-        if not task_id and "message" in progress["update"]:
-            status = "completed"
-        values = {
-            "correlation": {"taskId": task_id},
-            "status": status,
-            "output": progress,
-            "finishedAt": iso_now() if status in {
-                "completed", "failed", "cancelled", "rejected",
-            } else None,
-        }
-        yield from state.ensure_snapshot()
-        if state.a2a_activity is None:
-            state.a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
-        else:
-            delta = state.update_activity(state.a2a_activity, values)
-        yield delta
+        # LangGraphAgent 还会为同一 on_custom_event 发出 AG-UI CUSTOM；由 CUSTOM 唯一创建 activity。
+        return
+
+
+def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[BaseEvent]:
+    """把 A2A progress payload 转成活动时间线增量。
+
+    参数：progress 为 A2A_PROGRESS_EVENT 的 value；state 为当前运行活动状态。
+    返回值：活动快照（如尚未发送）及对应活动增量。
+    """
+    if not isinstance(progress, dict):
+        return
+
+    # A2A JSON 编码器可能输出协议名称或数值枚举；两种形式都归一到 schema 状态。
+    task_id = progress.get("taskId") or ""
+    task_status = progress.get("status")
+    task_status = task_status if isinstance(task_status, dict) else {}
+    remote_state = task_status.get("state")
+    state_names = {
+        0: "TASK_STATE_UNSPECIFIED",
+        1: "TASK_STATE_SUBMITTED",
+        2: "TASK_STATE_WORKING",
+        3: "TASK_STATE_COMPLETED",
+        4: "TASK_STATE_FAILED",
+        5: "TASK_STATE_CANCELED",
+        6: "TASK_STATE_INPUT_REQUIRED",
+        7: "TASK_STATE_REJECTED",
+        8: "TASK_STATE_AUTH_REQUIRED",
+    }
+    if isinstance(remote_state, int) and not isinstance(remote_state, bool):
+        remote_state = state_names.get(remote_state, remote_state)
+    status = {
+        "TASK_STATE_COMPLETED": "completed",
+        "TASK_STATE_FAILED": "failed",
+        "TASK_STATE_CANCELED": "cancelled",
+        "TASK_STATE_REJECTED": "rejected",
+        "TASK_STATE_INPUT_REQUIRED": "awaiting_input",
+        "TASK_STATE_AUTH_REQUIRED": "awaiting_auth",
+    }.get(remote_state, "running")
+    update = progress.get("update")
+    update = update if isinstance(update, dict) else {}
+    if not task_id and "message" in update:
+        status = "completed"
+    values = {
+        "correlation": {"taskId": task_id},
+        "status": status,
+        "output": progress,
+        "error": _a2a_error_summary(task_status.get("message")) if status == "failed" else None,
+        "finishedAt": iso_now() if status in {
+            "completed", "failed", "cancelled", "rejected",
+        } else None,
+    }
+    yield from state.ensure_snapshot()
+    if state.a2a_activity is None:
+        state.a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
+    else:
+        delta = state.update_activity(state.a2a_activity, values)
+    yield delta
+
+
+class CustomEventHandler:
+    """将指定 AG-UI CUSTOM 事件转换为远端任务活动。"""
+
+    def handle(self, event: Any, state: ActivityState) -> Iterator[BaseEvent]:
+        """处理 A2A progress 自定义事件，其他 CUSTOM 事件照常透传。
+
+        参数：event 为 AG-UI CUSTOM 事件；state 为本次运行活动状态。
+        返回值：A2A 活动快照/增量，或未识别的原始自定义事件。
+        """
+        if getattr(event, "name", None) != A2A_PROGRESS_EVENT:
+            yield event
+            return
+        yield from _a2a_progress_activity(getattr(event, "value", None), state)
 
 
 _STEP_ACTIVITY_TYPES = {
@@ -428,6 +491,7 @@ class RunErrorHandler:
 _REASONING_CONTENT = ReasoningMessageContentHandler()
 EVENT_HANDLERS: dict[EventType, EventHandler] = {
     EventType.RAW: RawEventHandler(),
+    EventType.CUSTOM: CustomEventHandler(),
     EventType.STEP_STARTED: StepStartedHandler(),
     EventType.STEP_FINISHED: StepFinishedHandler(),
     EventType.TEXT_MESSAGE_START: TextMessageStartHandler(),

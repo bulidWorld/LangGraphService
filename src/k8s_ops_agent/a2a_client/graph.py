@@ -110,6 +110,9 @@ async def _collect_task_events(
                                 "parts": [*previous.get("parts", []), *artifact.get("parts", [])],
                             }
                         artifacts[index] = artifact
+            # artifactUpdate 和 message 事件不一定携带 TaskStatus；活动 schema 要求每次进度都有状态。
+            if not isinstance(status, dict) or "state" not in status:
+                status = {"state": "TASK_STATE_WORKING"}
             logger.info(
                 "A2A 任务状态已更新",
                 extra={
