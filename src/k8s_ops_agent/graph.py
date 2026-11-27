@@ -217,7 +217,7 @@ async def assess_pod(state: AgentState, config: RunnableConfig) -> dict[str, Any
         updates["pod_handoff_ready"] = False
         return updates
 
-    diagnosis, repository, tag = parameters
+    diagnosis, repository, branch, tag = parameters
     request_id = str(uuid.uuid4())
     updates["pod_approval_id"] = request_id
     updates["pod_handoff_ready"] = True
@@ -229,7 +229,8 @@ async def assess_pod(state: AgentState, config: RunnableConfig) -> dict[str, Any
                 "data": {
                     "type": "coding",
                     "repository": repository,
-                    "branch": tag,
+                    "branch": branch,
+                    "tag": tag,
                     "instruction": A2A_CODING_PROMPT.format(diagnosis=diagnosis),
                 },
             }],

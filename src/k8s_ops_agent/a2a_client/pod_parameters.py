@@ -24,6 +24,9 @@ class PodAssessment(BaseModel):
     repository: str | None = Field(
         default=None, description="故障 Pod 对应的 Git 源码仓库克隆地址，缺失或不确定时为 null"
     )
+    branch: str | None = Field(
+        default=None, description="故障 Pod 对应的 Git 分支名称，缺失或不确定时为 null"
+    )
     tag: str | None = Field(
         default=None, description="故障 Pod 对应的 Git 源码 tag 名称，缺失或不确定时为 null"
     )
@@ -35,7 +38,7 @@ async def extract_pod_parameters(
     *,
     load_tools: Callable[[], Awaitable[Sequence[BaseTool]]] | None = None,
     execute_tool: Callable[[ToolCall], Awaitable[list[ToolMessage]]] | None = None,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     """结合本轮诊断和证据提取故障 Pod 的源码信息。
 
     参数：
@@ -43,7 +46,7 @@ async def extract_pod_parameters(
         model_factory: 创建用于结构化提取的模型的函数。
         load_tools: 缺少源码信息时加载可用查询工具的函数。
         execute_tool: 执行单个查询工具并返回结果消息的函数。
-    返回值：诊断文本、源码仓库地址和 Git tag。无法生成 Pod 编码任务时返回 None。
+    返回值：诊断文本、源码仓库地址、Git branch 和 Git tag。无法生成 Pod 编码任务时返回 None。
     """
     if not messages:
         return None
@@ -67,8 +70,9 @@ async def extract_pod_parameters(
     if not assessment.involves_pod:
         return None
     repository = (assessment.repository or "").strip()
+    branch = (assessment.branch or "").strip().removeprefix("refs/heads/")
     tag = (assessment.tag or "").strip().removeprefix("refs/tags/")
-    if (not repository or not tag) and load_tools is not None and execute_tool is not None:
+    if (not repository or not branch or not tag) and load_tools is not None and execute_tool is not None:
         extra_evidence = await _lookup_pod_evidence(
             model, diagnosis, evidence, await load_tools(), execute_tool
         )
@@ -80,18 +84,20 @@ async def extract_pod_parameters(
             if not assessment.involves_pod:
                 return None
             repository = (assessment.repository or "").strip()
+            branch = (assessment.branch or "").strip().removeprefix("refs/heads/")
             tag = (assessment.tag or "").strip().removeprefix("refs/tags/")
-    if not repository or not tag:
+    if not repository or not branch or not tag:
         logger.info(
-            "Pod 诊断缺少源码仓库或 Git tag，未生成 A2A 编码任务",
+            "Pod 诊断缺少源码仓库、Git branch 或 tag，未生成 A2A 编码任务",
             extra={
                 "log_type": "business",
                 "has_repository": bool(repository),
+                "has_git_branch": bool(branch),
                 "has_git_tag": bool(tag),
             },
         )
         return None
-    return diagnosis, repository, tag
+    return diagnosis, repository, branch, tag
 
 
 def _assessment_messages(

@@ -22,7 +22,10 @@ class GraphTurnRoutingTest(unittest.IsolatedAsyncioTestCase):
         返回值：无；路由或增量请求不符合预期时断言失败。
         """
         request = "上一轮建议的重试能用指数退避吗？"
-        coding = {"type": "coding", "repository": "https://example.org/repo.git", "branch": "v1"}
+        coding = {
+            "type": "coding", "repository": "https://example.org/repo.git",
+            "branch": "main", "tag": "v1",
+        }
         route = AsyncMock(side_effect=[
             TurnRouting(continue_coding=True),
             TurnRouting(continue_coding=False),

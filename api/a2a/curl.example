@@ -14,19 +14,19 @@ curl -sS "$A2A_URL/" \
   -H "Authorization: Bearer $A2A_API_TOKEN" \
   -d '{"jsonrpc":"2.0","id":"extended-card-1","method":"GetExtendedAgentCard","params":{}}'
 
-# SendMessage: submit a repository bug-fix task; coding requires repository and branch.
+# SendMessage: submit a repository bug-fix task; coding requires repository, branch, and tag.
 curl -sS "$A2A_URL/" \
   -H 'Content-Type: application/json' \
   -H 'A2A-Version: 1.0' \
   -H "Authorization: Bearer $A2A_API_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":"send-1","method":"SendMessage","params":{"message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
+  -d '{"jsonrpc":"2.0","id":"send-1","method":"SendMessage","params":{"message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","tag":"v1.2.3","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
 
 # SendStreamingMessage: submit a task and receive Server-Sent Events.
 curl -N -sS "$A2A_URL/" \
   -H 'Content-Type: application/json' \
   -H 'A2A-Version: 1.0' \
   -H "Authorization: Bearer $A2A_API_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":"stream-1","method":"SendStreamingMessage","params":{"message":{"messageId":"message-stream-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
+  -d '{"jsonrpc":"2.0","id":"stream-1","method":"SendStreamingMessage","params":{"message":{"messageId":"message-stream-1","role":"ROLE_USER","parts":[{"data":{"type":"coding","repository":"https://github.com/example/project.git","branch":"main","tag":"v1.2.3","instruction":"修复解析空配置时的空指针异常，并补充回归测试。"}}]}}}'
 
 # SendMessage: chat without a repository; response text is returned in the task artifact.
 curl -sS "$A2A_URL/" \

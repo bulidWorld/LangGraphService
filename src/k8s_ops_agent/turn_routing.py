@@ -68,8 +68,10 @@ async def route_turn(
     message = state.get("a2a_payload", {}).get("message", {})
     parts = message.get("parts", [])
     coding = parts[0].get("data", {}) if parts else {}
+    has_branch = bool(coding.get("branch"))
+    has_tag = bool(coding.get("tag"))
     if not user_text or coding.get("type") != "coding" or not (
-        coding.get("repository") and coding.get("branch")
+        coding.get("repository") and has_branch and has_tag
     ):
         return Command(goto="context_compression")
 
@@ -86,7 +88,8 @@ async def route_turn(
     decision = await classifier.ainvoke(
         build_turn_routing_messages(
             repository=coding["repository"],
-            branch=coding["branch"],
+            branch=coding.get("branch"),
+            tag=coding.get("tag"),
             previous_instruction=coding.get("instruction", ""),
             previous_coding_reply=plan,
             current_request=user_text,

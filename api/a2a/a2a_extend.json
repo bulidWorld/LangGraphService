@@ -19,6 +19,10 @@
               "default": "coding",
               "description": "Selects the agent. If omitted, the service treats the request as coding."
             },
+            "sessionId": {
+              "type": ["string", "null"],
+              "description": "Claude session UUID returned in an artifact's data.sessionId. Omit it, pass null, or pass a blank string to start a new session."
+            },
             "repository": {
               "type": "string",
               "minLength": 1,
@@ -32,7 +36,12 @@
             "branch": {
               "type": "string",
               "minLength": 1,
-              "description": "Git branch required for coding tasks."
+              "description": "Git branch required for coding tasks; the service checks this branch before checking out tag."
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Git tag required for coding tasks; the task workspace is checked out at this tag."
             },
             "instruction": {
               "type": "string",
@@ -77,12 +86,12 @@
     },
     "CodingRequirements": {
       "type": "object",
-      "required": ["branch"],
+      "required": ["branch", "tag"],
       "anyOf": [
         {"required": ["repository"]},
         {"required": ["repo_url"]}
       ],
-      "description": "Coding requires a branch and either repository or repo_url."
+      "description": "Coding requires both branch and tag, and either repository or repo_url."
     },
     "CodingAgentMessagePart": {
       "allOf": [
