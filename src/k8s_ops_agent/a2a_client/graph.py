@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from k8s_ops_agent.a2a_client.client import A2AClient
+from k8s_ops_agent.observability import logger
 
 
 class A2ATaskState(TypedDict, total=False):
@@ -27,6 +28,16 @@ class A2ATaskState(TypedDict, total=False):
 
 
 A2A_PROGRESS_EVENT = "a2a_task_progress"
+
+
+def _event_kind(event: dict[str, Any]) -> str:
+    """返回 A2A 流事件的类别。
+
+    参数：
+        event: A2A StreamResponse 字典。
+    返回值：task、statusUpdate、artifactUpdate 或 unknown。
+    """
+    return next((key for key in ("task", "statusUpdate", "status_update", "artifactUpdate", "artifact_update") if key in event), "unknown")
 
 
 def _artifact_id(artifact: dict[str, Any]) -> str:
@@ -56,9 +67,15 @@ async def _collect_task_events(
     task_id = state.get("a2a_task_id", "")
     status = dict(state.get("a2a_status", {}))
     artifacts = list(state.get("a2a_artifacts", []))
+    event_count = 0
+    logger.info(
+        "A2A 任务事件收集开始",
+        extra={"log_type": "business", "existing_task_id": task_id, "existing_event_count": len(events)},
+    )
 
     async with aclosing(stream):
         async for event in stream:
+            event_count += 1
             if not response:
                 response = event
             events.append(event)
@@ -93,6 +110,15 @@ async def _collect_task_events(
                                 "parts": [*previous.get("parts", []), *artifact.get("parts", [])],
                             }
                         artifacts[index] = artifact
+            logger.info(
+                "A2A 任务状态已更新",
+                extra={
+                    "log_type": "business", "task_id": task_id or None,
+                    "event_index": event_count, "event_kind": _event_kind(event),
+                    "task_state": status.get("state") if isinstance(status, dict) else None,
+                    "artifact_count": len(artifacts), "event_keys": sorted(event.keys()),
+                },
+            )
             await adispatch_custom_event(
                 A2A_PROGRESS_EVENT,
                 {"taskId": task_id, "status": status, "update": event},
@@ -101,6 +127,16 @@ async def _collect_task_events(
 
     if task_id:
         task = {**task, "id": task_id, "status": status, "artifacts": artifacts}
+    logger.info(
+        "A2A 任务事件收集结束",
+        extra={
+            "log_type": "business", "task_id": task_id or None,
+            "task_state": status.get("state") if isinstance(status, dict) else None,
+            "event_count": event_count, "total_event_count": len(events),
+            "artifact_count": len(artifacts), "response_present": bool(response),
+            "empty_stream": event_count == 0,
+        },
+    )
     return {
         "a2a_response": response,
         "a2a_task": task,

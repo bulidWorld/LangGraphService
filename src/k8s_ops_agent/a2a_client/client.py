@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import time
 from collections.abc import AsyncGenerator
@@ -15,9 +14,8 @@ from a2a.types import AgentCard, SendMessageRequest, SubscribeToTaskRequest
 from a2a.utils.errors import A2AError
 from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
-
-logger = logging.getLogger("k8s_ops_agent.a2a_client")
-logger.setLevel(logging.DEBUG)
+from k8s_ops_agent.http_logging import payload_log_fields, response_log_fields
+from k8s_ops_agent.observability import current_trace_id, logger
 
 
 class A2AClientError(RuntimeError):
@@ -62,8 +60,18 @@ class A2AClient:
         """
         request = self._message_request(payload)
         async with self._transport("SendMessage") as transport:
+            request_fields = payload_log_fields(payload)
+            logger.info(
+                "A2A 请求已发送",
+                extra={"log_type": "business", "rpc_method": "SendMessage", **request_fields},
+            )
             response = await transport.send_message(request)
-            return MessageToDict(response)
+            result = MessageToDict(response)
+            logger.info(
+                "A2A 响应已解析",
+                extra={"log_type": "business", "rpc_method": "SendMessage", **_response_summary(result), **response_log_fields(result)},
+            )
+            return result
 
     def send_streaming_message(self, payload: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
         """提交消息并实时接收任务事件。
@@ -115,8 +123,24 @@ class A2AClient:
             else:
                 events = transport.subscribe(request)
             async with aclosing(events):
+                event_count = 0
                 async for event in events:
-                    yield MessageToDict(event)
+                    result = MessageToDict(event)
+                    event_count += 1
+                    logger.info(
+                        "A2A 流事件已接收",
+                        extra={
+                            "log_type": "business", "rpc_method": method,
+                            "event_index": event_count, **_response_summary(result),
+                            **response_log_fields(result),
+                        },
+                    )
+                    yield result
+                logger.info(
+                    "A2A 流已结束",
+                    extra={"log_type": "business", "rpc_method": method, "event_count": event_count,
+                           "empty_stream": event_count == 0},
+                )
 
     @asynccontextmanager
     async def _transport(self, method: str) -> AsyncGenerator[JsonRpcTransport, None]:
@@ -128,7 +152,9 @@ class A2AClient:
         """
         started = time.perf_counter()
         status = 500
-        request_log = {"method": "POST", "path": self.endpoint, "rpc_method": method}
+        request_log = {"method": "POST", "path": self.endpoint, "rpc_method": method,
+                       "trace_id": current_trace_id()}
+        logger.info("A2A 请求开始", extra={"log_type": "business", **request_log})
 
         async def record_status(response: httpx.Response) -> None:
             """记录响应状态，供请求结束时输出日志。
@@ -162,3 +188,23 @@ class A2AClient:
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 },
             )
+
+
+def _response_summary(response: dict[str, Any]) -> dict[str, Any]:
+    """提取 A2A 响应结构摘要，避免在默认日志中记录业务正文。
+
+    参数：
+        response: SDK 转换后的 A2A JSON 响应。
+    返回值：包含响应类别、任务标识和任务状态的结构化摘要。
+    """
+    task = response.get("task") if isinstance(response.get("task"), dict) else {}
+    status = task.get("status") if isinstance(task.get("status"), dict) else {}
+    message = response.get("message") if isinstance(response.get("message"), dict) else {}
+    return {
+        "response_kind": next((key for key in ("task", "message", "statusUpdate", "artifactUpdate") if key in response), "unknown"),
+        "task_id": task.get("id") or response.get("taskId") or response.get("task_id"),
+        "task_state": status.get("state"),
+        "artifact_count": len(task.get("artifacts", [])) if isinstance(task.get("artifacts"), list) else 0,
+        "message_present": bool(message),
+        "response_keys": sorted(response.keys()),
+    }

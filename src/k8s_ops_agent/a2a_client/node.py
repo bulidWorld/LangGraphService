@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import time
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
 from k8s_ops_agent.a2a_client.client import A2AClient
+from k8s_ops_agent.observability import logger
 
 
 def build_a2a_client_node(
@@ -40,7 +42,21 @@ def build_a2a_client_node(
         payload = state.get(payload_key)
         if not isinstance(payload, dict):
             raise ValueError(f"LangGraph 状态缺少字典类型的 {payload_key}")
-        result = await a2a_client.send_message(payload)
-        return {result_key: result}
+        started = time.perf_counter()
+        logger.info("A2A 节点调用开始", extra={"log_type": "business", "payload_key": payload_key})
+        try:
+            result = await a2a_client.send_message(payload)
+            logger.info(
+                "A2A 节点调用完成",
+                extra={"log_type": "business", "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                       "response_keys": sorted(result.keys()), "response_present": bool(result)},
+            )
+            return {result_key: result}
+        except Exception:
+            logger.exception(
+                "A2A 节点调用异常",
+                extra={"log_type": "exception", "duration_ms": round((time.perf_counter() - started) * 1000, 2)},
+            )
+            raise
 
     return a2a_client_node
