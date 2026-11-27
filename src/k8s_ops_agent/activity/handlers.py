@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from ag_ui.core.events import BaseEvent, EventType
 
 from k8s_ops_agent.a2a_client.graph import A2A_PROGRESS_EVENT
+from k8s_ops_agent.approve.mcp_tool import tool_approval_request_id
 
 from .state import ActivityState, iso_now, timestamp_ms
 
@@ -75,6 +76,7 @@ _STEP_ACTIVITY_TYPES = {
     "assistant": ("reasoning", "Thinking"),
     "assess_pod": ("reasoning", "Thinking"),
     "finalize": ("model_summary", "模型总结"),
+    "approve_pod_handoff": ("tool_execution", "analyze_pod_issue"),
 }
 
 
@@ -92,7 +94,14 @@ class StepStartedHandler:
             state.step_parts.clear()
             state.step_reasoning_id = None
             state.active_step_name = step_name
-            state.step_activity, delta = state.add_activity(*_STEP_ACTIVITY_TYPES[step_name])
+            activity_type, title = _STEP_ACTIVITY_TYPES[step_name]
+            extra = None
+            if step_name == "approve_pod_handoff":
+                extra = {
+                    "tool": {"name": "analyze_pod_issue", "server": "a2a-agent"},
+                    "correlation": {"toolCallId": f"handoff:{state.content['run']['runId']}"},
+                }
+            state.step_activity, delta = state.add_activity(activity_type, title, extra)
             yield delta
         yield event
 
@@ -280,16 +289,62 @@ class RunStartedHandler:
         yield from state.ensure_snapshot()
 
 
+def _mark_approval_activities(outcome: Any, state: ActivityState) -> Iterator[BaseEvent]:
+    """根据审批中断关联工具调用，并补齐图节点直接发起的工具活动。
+
+    参数：outcome 为运行中断结果，state 为本次运行的活动状态。
+    返回值：工具活动的创建与待审批状态增量。
+    """
+    thread_id = state.content["run"]["threadId"]
+    by_request_id = {
+        tool_approval_request_id(thread_id, call_id): item
+        for call_id, item in state.active_by_tool_call.items()
+    }
+    for interrupt in outcome.interrupts:
+        request = (interrupt.metadata or {}).get("langgraph", {}).get("raw")
+        if not isinstance(request, dict) or request.get("type") != "approval_request":
+            continue
+        request_id = request["request_id"]
+        item = by_request_id.get(request_id)
+        if (
+            item is None
+            and state.active_step_name == "approve_pod_handoff"
+            and state.step_activity is not None
+        ):
+            item = state.step_activity
+            yield state.update_activity(item, {
+                "correlation": {"toolCallId": request_id},
+                "request_id": request_id,
+            })
+            by_request_id[request_id] = item
+        if item is None:
+            tool_name = request["tool_name"]
+            item, delta = state.add_activity("tool_execution", tool_name, {
+                "tool": {"name": tool_name},
+                "correlation": {"toolCallId": request_id},
+                "request_id": request_id,
+            })
+            by_request_id[request_id] = item
+            yield delta
+        yield state.update_activity(item, {
+            "status": "awaiting_approval",
+            "finishedAt": None,
+            "request_id": request_id,
+        })
+
+
 def _finish_run(
     state: ActivityState,
     status: str,
     error: str | None,
     interrupted: bool,
+    *,
+    approval_activities_marked: bool = False,
 ) -> Iterator[BaseEvent]:
     """收尾尚未结束的活动并更新运行状态。
 
     参数：state 为本次运行的活动状态，status 为运行终态，error 为错误信息，
-        interrupted 表示运行是否暂停等待审批。
+        interrupted 表示运行是否暂停等待审批，approval_activities_marked 表示已按审批请求更新工具活动。
     返回值：按远端任务、步骤、工具调用、运行的顺序产生相关增量事件。
     """
     if status == "failed" and state.a2a_activity is not None and state.a2a_activity["status"] == "running":
@@ -307,7 +362,7 @@ def _finish_run(
             "output": state.step_output(),
         })
     for item in state.active_by_tool_call.values():
-        if item["status"] == "running":
+        if item["status"] == "running" and not approval_activities_marked:
             yield state.update_activity(item, {
                 "status": terminal,
                 "finishedAt": None if terminal == "awaiting_approval" else iso_now(),
@@ -337,12 +392,21 @@ class RunFinishedHandler:
         返回值：可选快照、活动增量及原始运行结束事件。
         """
         yield from state.ensure_snapshot()
-        interrupted = getattr(getattr(event, "outcome", None), "type", None) == "interrupt"
+        outcome = getattr(event, "outcome", None)
+        interrupted = getattr(outcome, "type", None) == "interrupt"
         if not interrupted and state.final_message_parts:
             event.result = "".join(state.final_message_parts)
         event.timestamp = event.timestamp or timestamp_ms()
         status = "awaiting_approval" if interrupted else "completed"
-        yield from _finish_run(state, status, None, interrupted)
+        approval_activities_marked = False
+        if interrupted:
+            for delta in _mark_approval_activities(outcome, state):
+                approval_activities_marked = True
+                yield delta
+        yield from _finish_run(
+            state, status, None, interrupted,
+            approval_activities_marked=approval_activities_marked,
+        )
         yield event
 
 

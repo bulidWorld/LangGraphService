@@ -11,6 +11,15 @@ from k8s_ops_agent.approval import request_mcp_tool_approval
 from k8s_ops_agent.observability import operation_observation
 
 
+def tool_approval_request_id(thread_id: str, tool_call_id: str) -> str:
+    """生成 MCP 工具调用对应的稳定审批请求标识。
+
+    参数：thread_id 为会话标识，tool_call_id 为工具调用标识。
+    返回值：用于保存审批及关联活动的 UUID 字符串。
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mcp-approval:{thread_id}:{tool_call_id}"))
+
+
 async def request_tool_approval(
     call: dict[str, Any], config: RunnableConfig, policy: dict[str, Any]
 ) -> dict[str, Any]:
@@ -24,7 +33,7 @@ async def request_tool_approval(
     """
     thread_id = config.get("configurable", {}).get("thread_id", "")
     run_id = config.get("run_id")
-    request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mcp-approval:{thread_id}:{call['id']}"))
+    request_id = tool_approval_request_id(thread_id, call["id"])
     server_name = policy["mcp_server"]
     tool_name = call["name"]
     async with operation_observation(
