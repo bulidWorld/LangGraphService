@@ -10,10 +10,11 @@ from ag_ui.core.events import (
     ToolCallArgsEvent,
     ToolCallResultEvent,
     ToolCallStartEvent,
+    CustomEvent,
 )
 
 from k8s_ops_agent import graph_node_constants as nodes
-from k8s_ops_agent.a2a_client.graph import A2A_PROGRESS_EVENT
+from k8s_ops_agent.a2a_client.graph import A2A_ARTIFACT_EVENT, A2A_PROGRESS_EVENT
 from k8s_ops_agent.approve.mcp_tool import tool_approval_request_id
 
 from .state import ActivityState, iso_now, timestamp_ms
@@ -185,6 +186,11 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
     }
     if isinstance(remote_state, int) and not isinstance(remote_state, bool):
         remote_state = state_names.get(remote_state, remote_state)
+    update = progress.get("update")
+    update = update if isinstance(update, dict) else {}
+    if remote_state == "TASK_STATE_COMPLETED":
+        # 完成状态事件的 message 是远端任务最终内容，保留其原始结构供 RUN_FINISHED 使用。
+        state.a2a_completed_result = task_status.get("message") or update.get("message")
     status = {
         "TASK_STATE_COMPLETED": "completed",
         "TASK_STATE_FAILED": "failed",
@@ -194,8 +200,6 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
         "TASK_STATE_AUTH_REQUIRED": "awaiting_auth",
     }.get(remote_state, "running")
     message = task_status.get("message")
-    update = progress.get("update")
-    update = update if isinstance(update, dict) else {}
     if message is None:
         message = update.get("message")
     message_text = _a2a_message_text(message)
@@ -229,6 +233,9 @@ class CustomEventHandler:
         返回值：A2A 活动快照/增量，或未识别的原始自定义事件。
         """
         if getattr(event, "name", None) != A2A_PROGRESS_EVENT:
+            if getattr(event, "name", None) == A2A_ARTIFACT_EVENT:
+                yield event
+                return
             yield event
             return
         yield from _a2a_progress_activity(getattr(event, "value", None), state)
@@ -561,6 +568,8 @@ class RunFinishedHandler:
         interrupted = getattr(outcome, "type", None) == "interrupt"
         if not interrupted and state.final_message_parts:
             event.result = "".join(state.final_message_parts)
+        elif not interrupted and state.a2a_completed_result is not None:
+            event.result = state.a2a_completed_result
         event.timestamp = event.timestamp or timestamp_ms()
         status = "awaiting_approval" if interrupted else "completed"
         approval_activities_marked = False

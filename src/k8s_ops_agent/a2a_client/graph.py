@@ -29,6 +29,7 @@ class A2ATaskState(TypedDict, total=False):
 
 
 A2A_PROGRESS_EVENT = "a2a_task_progress"
+A2A_ARTIFACT_EVENT = "a2a_artifact_update"
 
 
 def _event_kind(event: dict[str, Any]) -> str:
@@ -68,6 +69,7 @@ async def _collect_task_events(
     task_id = state.get("a2a_task_id", "")
     status = dict(state.get("a2a_status", {}))
     artifacts = list(state.get("a2a_artifacts", []))
+    artifact_updates: list[dict[str, Any]] = []
     event_count = 0
     logger.info(
         "A2A 任务事件收集开始",
@@ -95,6 +97,26 @@ async def _collect_task_events(
                 task_id = artifact_update.get("taskId") or artifact_update.get("task_id") or task_id
                 artifact = artifact_update.get("artifact")
                 if isinstance(artifact, dict):
+                    # 合并本次流中的同一 artifact；append=false 用最新快照替换，append=true 追加 parts。
+                    update_index = next(
+                        (i for i, item in enumerate(artifact_updates)
+                         if _artifact_id(item.get("artifact", {})) == _artifact_id(artifact)
+                         and _artifact_id(artifact)),
+                        None,
+                    )
+                    if update_index is None:
+                        artifact_updates.append(artifact_update)
+                    else:
+                        previous_update = artifact_updates[update_index]
+                        previous_artifact = previous_update.get("artifact", {})
+                        if artifact_update.get("append"):
+                            merged_artifact = {
+                                **previous_artifact, **artifact,
+                                "parts": [*previous_artifact.get("parts", []), *artifact.get("parts", [])],
+                            }
+                            artifact_updates[update_index] = {**previous_update, **artifact_update, "artifact": merged_artifact}
+                        else:
+                            artifact_updates[update_index] = artifact_update
                     artifact_id = _artifact_id(artifact)
                     index = next(
                         (i for i, item in enumerate(artifacts) if artifact_id and _artifact_id(item) == artifact_id),
@@ -123,11 +145,31 @@ async def _collect_task_events(
                     "artifact_count": len(artifacts), "event_keys": sorted(event.keys()),
                 },
             )
-            await adispatch_custom_event(
-                A2A_PROGRESS_EVENT,
-                {"taskId": task_id, "status": status, "update": event},
-                config=config,
-            )
+            if _event_kind(event) != "artifactUpdate":
+                await adispatch_custom_event(
+                    A2A_PROGRESS_EVENT,
+                    {"taskId": task_id, "status": status, "update": event},
+                    config=config,
+                )
+
+    if artifact_updates:
+        merged_updates = []
+        for item in artifact_updates:
+            merged_updates.append({
+                "taskId": item.get("taskId") or item.get("task_id") or task_id,
+                **({"contextId": item["contextId"]} if item.get("contextId") else {}),
+                "artifact": item["artifact"],
+                **({"metadata": item["metadata"]} if item.get("metadata") else {}),
+            })
+        if len(merged_updates) == 1:
+            artifact_payload = merged_updates[0]
+        else:
+            artifact_payload = {"taskId": task_id, "artifacts": merged_updates}
+        await adispatch_custom_event(
+            A2A_ARTIFACT_EVENT,
+            artifact_payload,
+            config=config,
+        )
 
     if task_id:
         task = {**task, "id": task_id, "status": status, "artifacts": artifacts}

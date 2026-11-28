@@ -63,6 +63,7 @@ class ActivityState:
         self.step_reasoning_id: str | None = None
         self.final_message_id: str | None = None
         self.latest_a2a_activity: dict[str, Any] | None = None
+        self.a2a_completed_result: Any = None
         self.final_message_parts: list[str] = []
         self.snapshot_sent = False
 
