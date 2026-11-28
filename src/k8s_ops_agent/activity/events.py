@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 
+from ag_ui.core.events import EventType
 from ag_ui.core.types import RunAgentInput
 from ag_ui.encoder import EventEncoder
 from ag_ui_langgraph import LangGraphAgent
@@ -27,6 +28,9 @@ async def event_generator(
     """
     state = ActivityState(input_data)
     async for event in request_agent.run(normalized_input):
+        raw = event.event if event.type == EventType.RAW else getattr(event, "raw_event", None)
+        if isinstance(raw, dict) and (raw.get("metadata") or {}).get("emit-messages") is False:
+            continue
         handler = EVENT_HANDLERS.get(getattr(event, "type", None))
         outgoing = handler.handle(event, state) if handler is not None else (event,)
         for output in outgoing:

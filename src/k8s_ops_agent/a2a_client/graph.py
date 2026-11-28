@@ -8,9 +8,10 @@ from typing import Any
 
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph
 from typing_extensions import TypedDict
 
+from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent.a2a_client.client import A2AClient
 from k8s_ops_agent.observability import logger
 
@@ -191,9 +192,9 @@ def build_a2a_task_graph(client: A2AClient | None = None) -> Any:
         )
 
     builder = StateGraph(A2ATaskState)
-    builder.add_node("submit_task", submit_task)
-    builder.add_node("collect_task_events", collect_task_events)
-    builder.add_edge(START, "submit_task")
-    builder.add_edge("submit_task", END)
-    builder.add_edge("collect_task_events", END)
+    builder.add_node(nodes.SUBMIT_TASK, submit_task)
+    builder.add_node(nodes.COLLECT_TASK_EVENTS, collect_task_events)
+    builder.add_edge(nodes.START, nodes.SUBMIT_TASK)
+    builder.add_edge(nodes.SUBMIT_TASK, nodes.END)
+    builder.add_edge(nodes.COLLECT_TASK_EVENTS, nodes.END)
     return builder.compile()

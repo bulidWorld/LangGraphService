@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from ag_ui.core.events import BaseEvent, EventType
 
+from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent.a2a_client.graph import A2A_PROGRESS_EVENT
 from k8s_ops_agent.approve.mcp_tool import tool_approval_request_id
 
@@ -132,11 +133,12 @@ class CustomEventHandler:
 
 
 _STEP_ACTIVITY_TYPES = {
-    "route_turn": ("mode_selection", "模式选择"),
-    "assistant": ("reasoning", "Thinking"),
-    "assess_pod": ("reasoning", "Thinking"),
-    "finalize": ("model_summary", "模型总结"),
-    "approve_pod_handoff": ("tool_execution", "analyze_pod_issue"),
+    nodes.ROUTE_TURN: ("mode_selection", "模式选择"),
+    nodes.ASSISTANT: ("reasoning", "Thinking"),
+    nodes.ASSESS_POD: ("reasoning", "Thinking"),
+    nodes.FINALIZE: ("model_summary", "模型总结"),
+    nodes.A2A_FALLBACK: ("model_summary", "模型总结"),
+    nodes.APPROVE_POD_HANDOFF: ("tool_execution", "analyze_pod_issue"),
 }
 
 
@@ -156,7 +158,7 @@ class StepStartedHandler:
             state.active_step_name = step_name
             activity_type, title = _STEP_ACTIVITY_TYPES[step_name]
             extra = None
-            if step_name == "approve_pod_handoff":
+            if step_name == nodes.APPROVE_POD_HANDOFF:
                 extra = {
                     "tool": {"name": "analyze_pod_issue", "server": "a2a-agent"},
                     "correlation": {"toolCallId": f"handoff:{state.content['run']['runId']}"},
@@ -368,7 +370,7 @@ def _mark_approval_activities(outcome: Any, state: ActivityState) -> Iterator[Ba
         item = by_request_id.get(request_id)
         if (
             item is None
-            and state.active_step_name == "approve_pod_handoff"
+            and state.active_step_name == nodes.APPROVE_POD_HANDOFF
             and state.step_activity is not None
         ):
             item = state.step_activity

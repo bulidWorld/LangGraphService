@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -23,6 +24,33 @@ from k8s_ops_agent.graph import build_graph
 from k8s_ops_agent.middleware import AccessLogMiddleware
 from k8s_ops_agent.observability import logger
 from k8s_ops_agent.resume_validation import validate_resume
+
+
+_uvicorn_access_logger = logging.getLogger("uvicorn.access")
+
+
+def _filter_health_access_log(record: logging.LogRecord) -> bool:
+    """将成功的健康检查访问日志调整为 DEBUG。
+
+    参数：
+        record: Uvicorn 生成的访问日志记录。
+    返回值：当前日志级别是否允许输出该记录。
+    """
+    args = record.args
+    if record.levelno != logging.INFO or not isinstance(args, tuple) or len(args) != 5:
+        return True
+
+    _, method, target, _, status = args
+    if method != "GET" or target.partition("?")[0] != "/health" or status != 200:
+        return True
+
+    # Logger 已按原始 INFO 级别放行，降级后需要重新检查生效级别。
+    record.levelno = logging.DEBUG
+    record.levelname = "DEBUG"
+    return _uvicorn_access_logger.isEnabledFor(logging.DEBUG)
+
+
+_uvicorn_access_logger.addFilter(_filter_health_access_log)
 
 
 # 进程启动时读取一次连接配置；不记录凭据，且 database_conninfo() 会拒绝不完整配置。
@@ -152,5 +180,5 @@ async def health(request: Request) -> dict[str, str]:
         request: 当前 HTTP 请求，用于读取应用级 agent 实例。
     返回值：服务状态和 agent 标识。
     """
-    logger.info("Health check completed", extra={"log_type": "business"})
+    logger.debug("Health check completed", extra={"log_type": "business"})
     return {"status": "ok", "agent": request.app.state.agent.name}

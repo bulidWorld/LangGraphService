@@ -13,9 +13,10 @@ from ag_ui_langgraph import LangGraphAgent
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import StateGraph
 
 from k8s_ops_agent import graph as agent_graph
+from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent import tool_execution
 
 
@@ -82,9 +83,9 @@ class ToolCallResultEventTest(unittest.TestCase):
             return await agent_graph.tools_node(state, config)
 
         builder = StateGraph(agent_graph.AgentState)
-        builder.add_node("tools", tools_node)
-        builder.add_edge(START, "tools")
-        builder.add_edge("tools", END)
+        builder.add_node(nodes.TOOLS, tools_node)
+        builder.add_edge(nodes.START, nodes.TOOLS)
+        builder.add_edge(nodes.TOOLS, nodes.END)
         graph = builder.compile(checkpointer=MemorySaver())
         agent = LangGraphAgent(
             name="tool_result_test",

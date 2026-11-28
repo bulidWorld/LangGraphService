@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from typing import Literal
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -12,6 +12,7 @@ from langgraph.graph import MessagesState
 from langgraph.types import Command
 from pydantic import BaseModel
 
+from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent.a2a_client import A2ATaskState
 from k8s_ops_agent.prompts import build_turn_routing_messages
 
@@ -19,9 +20,11 @@ from k8s_ops_agent.prompts import build_turn_routing_messages
 class TurnRoutingState(MessagesState, A2ATaskState, total=False):
     """入口路由所需的对话消息和 A2A 任务状态。"""
 
+    a2a_coding: dict[str, Any]
+
 
 class TurnRouting(BaseModel):
-    """判断当前用户消息是否继续讨论已有编码方案。"""
+    """判断当前用户消息是否继续已有编码会话。"""
 
     continue_coding: bool
 
@@ -46,12 +49,13 @@ def _coding_context_id(state: TurnRoutingState) -> str:
             context_id = update.get("contextId") or update.get("context_id")
             if context_id:
                 return context_id
-    return ""
+    # 远端本轮可能只返回消息或事件，且省略已在请求中指定的上下文。
+    return state.get("a2a_payload", {}).get("message", {}).get("contextId", "")
 
 
 async def route_turn(
     state: TurnRoutingState, *, model_factory: Callable[[], ChatOpenAI]
-) -> Command[Literal["context_compression", "a2a"]]:
+) -> Command[str]:
     """按当前用户意图开启运维诊断或续接已授权的 A2A 编码对话。
 
     参数：
@@ -62,18 +66,17 @@ async def route_turn(
     messages = state.get("messages", [])
     context_id = _coding_context_id(state)
     if not context_id or not messages or not isinstance(messages[-1], HumanMessage):
-        return Command(goto="context_compression")
+        return Command(goto=nodes.CONTEXT_COMPRESSION)
 
-    user_text = messages[-1].text.strip()
+    user_text = messages[-1].text
     message = state.get("a2a_payload", {}).get("message", {})
     parts = message.get("parts", [])
-    coding = parts[0].get("data", {}) if parts else {}
-    has_branch = bool(coding.get("branch"))
-    has_tag = bool(coding.get("tag"))
-    if not user_text or coding.get("type") != "coding" or not (
-        coding.get("repository") and has_branch and has_tag
+    first_part = parts[0] if parts else {}
+    coding = state.get("a2a_coding") or first_part.get("data", {})
+    if not user_text.strip() or coding.get("type") != "coding" or not (
+        coding.get("repository") and coding.get("branch") and coding.get("tag")
     ):
-        return Command(goto="context_compression")
+        return Command(goto=nodes.CONTEXT_COMPRESSION)
 
     # 只取近期方案文本辅助判断，完整上下文由远端会话维护。
     remote_message = state.get("a2a_status", {}).get("message") or {}
@@ -90,24 +93,30 @@ async def route_turn(
             repository=coding["repository"],
             branch=coding.get("branch"),
             tag=coding.get("tag"),
-            previous_instruction=coding.get("instruction", ""),
+            previous_instruction=first_part.get("text", coding.get("instruction", "")),
             previous_coding_reply=plan,
             current_request=user_text,
         ),
-        config={"tags": ["nostream"]},
+        config={
+            "tags": ["nostream"],
+            "metadata": {"emit-messages": False, "emit-tool-calls": False},
+        },
     )
     if not decision or not decision.continue_coding:
-        return Command(goto="context_compression")
+        return Command(goto=nodes.CONTEXT_COMPRESSION)
 
     follow_up = {
         "messageId": str(uuid.uuid4()),
         "contextId": context_id,
         "role": "ROLE_USER",
-        "parts": [{"data": {**coding, "instruction": user_text}}],
+        "parts": [{"text": user_text}],
     }
     # 等待补充输入的任务需要 taskId。已结束的任务通过 contextId 续聊。
     if state.get("a2a_status", {}).get("state") == "TASK_STATE_INPUT_REQUIRED":
         task_id = state.get("a2a_task_id")
         if task_id:
             follow_up["taskId"] = task_id
-    return Command(update={"a2a_payload": {"message": follow_up}}, goto="a2a")
+    return Command(
+        update={"a2a_payload": {"message": follow_up}, "a2a_coding": coding},
+        goto=nodes.A2A,
+    )

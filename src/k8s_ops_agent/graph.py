@@ -6,16 +6,17 @@ import os
 import time
 import uuid
 from functools import partial
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import MessagesState, StateGraph
 from langgraph.types import Command
 
+from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent.a2a_client import build_a2a_task_graph
 from k8s_ops_agent.a2a_client.pod_parameters import extract_pod_parameters
 from k8s_ops_agent.approve.pod_handoff import request_pod_handoff_approval
@@ -146,7 +147,7 @@ async def tools_node(
     return {"messages": results, "workspace_files": workspace_files}
 
 
-def route_after_assistant(state: MessagesState) -> Literal["tools", "assess_pod"]:
+def route_after_assistant(state: MessagesState) -> str:
     """判断主诊断是否仍需执行工具。
 
     参数：
@@ -155,8 +156,8 @@ def route_after_assistant(state: MessagesState) -> Literal["tools", "assess_pod"
     """
     last_message = state["messages"][-1]
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
-        return "tools"
-    return "assess_pod"
+        return nodes.TOOLS
+    return nodes.ASSESS_POD
 
 
 async def assess_pod(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -169,6 +170,7 @@ async def assess_pod(state: AgentState, config: RunnableConfig) -> dict[str, Any
     """
     updates: dict[str, Any] = {
         "pod_approval_id": None,
+        "a2a_coding": {},
         "a2a_payload": {},
         "a2a_response": {},
         "a2a_task": {},
@@ -239,14 +241,14 @@ async def assess_pod(state: AgentState, config: RunnableConfig) -> dict[str, Any
     return updates
 
 
-def route_after_assessment(state: AgentState) -> Literal["approve_pod_handoff", "finalize"]:
+def route_after_assessment(state: AgentState) -> str:
     """按 Pod 转交准备状态选择审批流程或生成用户总结。
 
     参数：
         state: 包含 Pod 评估结果的当前图状态。
     返回值：审批节点或最终答复节点名称。
     """
-    return "approve_pod_handoff" if state.get("pod_handoff_ready") else "finalize"
+    return nodes.APPROVE_POD_HANDOFF if state.get("pod_handoff_ready") else nodes.FINALIZE
 
 
 async def finalize_node(state: AgentState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
@@ -267,9 +269,72 @@ async def finalize_node(state: AgentState, config: RunnableConfig) -> dict[str, 
     return {"messages": [response]}
 
 
+def _has_a2a_content(parts: list[dict[str, Any]]) -> bool:
+    """判断远端消息或产物是否包含可交付内容。
+
+    参数：
+        parts: A2A 消息或产物的内容片段。
+    返回值：是否有非空文本、结构化数据或文件内容。
+    """
+    return any(
+        (part.get("text") or "").strip()
+        or part.get("data")
+        or part.get("url")
+        or part.get("raw")
+        for part in parts
+    )
+
+
+def route_after_a2a(state: AgentState) -> str:
+    """按本轮 A2A 收集到的消息或产物选择后续节点。
+
+    参数：
+        state: 包含本轮 A2A 事件、状态和合并后产物的图状态。
+    返回值：有有效内容时结束主图，否则进入模型兜底节点。
+    """
+    if any(
+        _has_a2a_content(artifact.get("parts", []))
+        for artifact in state.get("a2a_artifacts", [])
+    ):
+        return nodes.END
+
+    for event in state.get("a2a_events", []):
+        update = event.get("task") or event.get("statusUpdate") or event.get("status_update") or {}
+        status = update.get("status") or {}
+        message = event.get("message")
+        if not message and status.get("state") not in (
+            0, 1, 2, "TASK_STATE_UNSPECIFIED", "TASK_STATE_SUBMITTED", "TASK_STATE_WORKING",
+        ):
+            message = status.get("message")
+        message = message or {}
+        if message.get("role") not in ("ROLE_USER", 1) and _has_a2a_content(
+            message.get("parts", [])
+        ):
+            return nodes.END
+    return nodes.A2A_FALLBACK
+
+
+async def a2a_fallback_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+    """远端缺少有效答复时，依据对话历史回复用户。
+
+    参数：
+        state: 包含用户当前请求和已保存对话消息的图状态。
+    返回值：追加到对话历史的助手回复。
+    """
+    response = await _model().ainvoke([
+        SystemMessage(content=(
+            "远端编码助手本轮没有返回可用答复。请根据对话历史回答用户最后一条消息，"
+            "提供已有信息能支持的解释或建议。不要声称远端任务已执行或完成，"
+            "也不要编造新的执行结果。若信息不足，请明确说明。"
+        )),
+        *state.get("messages", []),
+    ])
+    return {"messages": [response]}
+
+
 async def approve_pod_handoff(
     state: AgentState, config: RunnableConfig
-) -> Command[Literal["a2a", "__end__"]]:
+) -> Command[str]:
     """用 MTAP 审批门禁控制已保存的 Pod 诊断转交请求。
 
     参数：
@@ -279,11 +344,11 @@ async def approve_pod_handoff(
     """
     request_id = state.get("pod_approval_id")
     if not request_id:
-        return Command(goto=END)
+        return Command(goto=nodes.END)
     approved = await request_pod_handoff_approval(
         request_id, state["a2a_payload"], config
     )
-    return Command(goto="a2a" if approved else END)
+    return Command(goto=nodes.A2A if approved else nodes.END)
 
 
 def build_graph(*, checkpointer: Any = None):
@@ -297,30 +362,36 @@ def build_graph(*, checkpointer: Any = None):
     # 工具返回后重新计算视图，assistant 节点始终读取最新压缩结果。
     builder = StateGraph(AgentState)
     builder.add_node(
-        "route_turn",
+        nodes.ROUTE_TURN,
         partial(route_turn, model_factory=_model),
-        destinations=("context_compression", "a2a"),
+        destinations=(nodes.CONTEXT_COMPRESSION, nodes.A2A),
     )
-    builder.add_node("context_compression", context_compression_node)
-    builder.add_node("assistant", assistant_node)
-    builder.add_node("tools", tools_node)
-    builder.add_node("assess_pod", assess_pod)
-    builder.add_node("approve_pod_handoff", approve_pod_handoff)
-    builder.add_node("finalize", finalize_node)
-    builder.add_node("a2a", build_a2a_task_graph())
-    builder.add_edge(START, "route_turn")
-    builder.add_edge("context_compression", "assistant")
+    builder.add_node(nodes.CONTEXT_COMPRESSION, context_compression_node)
+    builder.add_node(nodes.ASSISTANT, assistant_node)
+    builder.add_node(nodes.TOOLS, tools_node)
+    builder.add_node(nodes.ASSESS_POD, assess_pod)
+    builder.add_node(
+        nodes.APPROVE_POD_HANDOFF,
+        approve_pod_handoff,
+        destinations=(nodes.A2A, nodes.END),
+    )
+    builder.add_node(nodes.FINALIZE, finalize_node)
+    builder.add_node(nodes.A2A, build_a2a_task_graph())
+    builder.add_node(nodes.A2A_FALLBACK, a2a_fallback_node)
+    builder.add_edge(nodes.START, nodes.ROUTE_TURN)
+    builder.add_edge(nodes.CONTEXT_COMPRESSION, nodes.ASSISTANT)
     builder.add_conditional_edges(
-        "assistant",
+        nodes.ASSISTANT,
         route_after_assistant,
-        {"tools": "tools", "assess_pod": "assess_pod"},
+        [nodes.TOOLS, nodes.ASSESS_POD],
     )
-    builder.add_edge("tools", "context_compression")
+    builder.add_edge(nodes.TOOLS, nodes.CONTEXT_COMPRESSION)
     builder.add_conditional_edges(
-        "assess_pod",
+        nodes.ASSESS_POD,
         route_after_assessment,
-        {"approve_pod_handoff": "approve_pod_handoff", "finalize": "finalize"},
+        [nodes.APPROVE_POD_HANDOFF, nodes.FINALIZE],
     )
-    builder.add_edge("finalize", END)
-    builder.add_edge("a2a", END)
+    builder.add_edge(nodes.FINALIZE, nodes.END)
+    builder.add_conditional_edges(nodes.A2A, route_after_a2a, [nodes.A2A_FALLBACK, nodes.END])
+    builder.add_edge(nodes.A2A_FALLBACK, nodes.END)
     return builder.compile(checkpointer=checkpointer)

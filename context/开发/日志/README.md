@@ -28,4 +28,4 @@
 ## HTTP 参数与响应日志开关
 - `HTTP_LOG_PAYLOAD_ENABLED=true` 时，入站 `access` 日志增加 `request_query`（保留重复参数的键值对列表）、`request_body`、`response_body`；出站 `http` 日志记录可用的 `request_body`、`response_body`。默认 `false`，不记录这些字段。
 - 正文最多保留 20000 个字符，超出时通过 `request_body_truncated` / `response_body_truncated` 标识。入站正文按 UTF-8 解码，仅记录应用实际读取的请求正文，不主动读取请求或阻塞流式响应；流式响应正文在请求结束时输出。MCP 工具出站日志的正文为工具调用参数及工具返回结果的 JSON 文本。
-- `/health` 仍不记录访问日志；不记录请求头。开启后正文和查询参数可能包含敏感业务内容，请按需开启。
+- `/health` 不生成中间件访问日志，Uvicorn 将成功的 `GET /health`（200）访问日志记为 DEBUG。不记录请求头。开启后正文和查询参数可能包含敏感业务内容，请按需开启。
