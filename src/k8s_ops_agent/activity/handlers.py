@@ -129,6 +129,8 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
     }
     yield from state.ensure_snapshot()
     state.latest_a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
+    # 新增 patch 必须先发送，确保客户端收到后续更新时对应数组项已存在。
+    yield delta
     # 每个收到的 A2A 状态条目单独新增，并立即标记为 completed。
     yield state.update_activity(state.latest_a2a_activity, {
         "status": "completed", "finishedAt": values["finishedAt"],
