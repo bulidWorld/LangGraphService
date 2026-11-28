@@ -42,6 +42,21 @@ def _a2a_error_summary(message: Any) -> str | None:
     return "\n".join(texts)[:1000] or None
 
 
+def _a2a_message_text(message: Any) -> str | None:
+    """提取 A2A 消息 parts 中的文本内容。
+
+    参数：message 为 A2A Message 字典或其他值。
+    返回值：按 parts 顺序拼接的文本；没有文本时返回 None。
+    """
+    if not isinstance(message, dict):
+        return None
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return None
+    texts = [part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)]
+    return "\n".join(texts) or None
+
+
 class RawEventHandler:
     """过滤 A2A 进度的原始副本，其他 RAW 事件照常转发。"""
 
@@ -99,22 +114,27 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
         "TASK_STATE_INPUT_REQUIRED": "awaiting_input",
         "TASK_STATE_AUTH_REQUIRED": "awaiting_auth",
     }.get(remote_state, "running")
+    message = task_status.get("message")
     update = progress.get("update")
     update = update if isinstance(update, dict) else {}
-    if not task_id and "message" in update:
-        status = "completed"
+    if message is None:
+        message = update.get("message")
+    message_text = _a2a_message_text(message)
     values = {
         "correlation": {"taskId": task_id},
-        "status": status,
-        "output": progress,
+        "status": "completed",
+        "output": {"text": message_text} if message_text is not None else None,
         "error": _a2a_error_summary(task_status.get("message")) if status == "failed" else None,
-        "finishedAt": iso_now() if status in {
-            "completed", "failed", "cancelled", "rejected",
-        } else None,
+        "finishedAt": iso_now(),
     }
     yield from state.ensure_snapshot()
     state.latest_a2a_activity, delta = state.add_activity("a2a_task", "远端任务", values)
-    yield delta
+    # 每个收到的 A2A 状态条目单独新增，并立即标记为 completed。
+    yield state.update_activity(state.latest_a2a_activity, {
+        "status": "completed", "finishedAt": values["finishedAt"],
+        "output": values["output"], "error": values["error"],
+        "correlation": values["correlation"],
+    })
 
 
 class CustomEventHandler:
