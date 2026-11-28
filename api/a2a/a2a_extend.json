@@ -5,6 +5,8 @@
   "description": "Application-specific message payloads extending the base A2A schemas in a2a.json.",
   "$defs": {
     "CodingAgentTaskPayload": {
+      "title": "Coding Agent Request Task Payload",
+      "description": "请求模型：定义客户端发送给服务端的任务输入，仅用于请求中的 CodingAgentRequestMessagePart.data。不要用于描述 Agent 回复。",
       "allOf": [
         {
           "$ref": "./a2a.json#/$defs/Value"
@@ -21,7 +23,7 @@
             },
             "sessionId": {
               "type": ["string", "null"],
-              "description": "Claude session UUID returned in an artifact's data.sessionId. Omit it, pass null, or pass a blank string to start a new session."
+              "description": "Service session UUID returned in an artifact's data.sessionId. Omit it, pass null, or pass a blank string to start a new session."
             },
             "repository": {
               "type": "string",
@@ -36,12 +38,12 @@
             "branch": {
               "type": "string",
               "minLength": 1,
-              "description": "Git branch required for coding tasks; the service checks this branch before checking out tag."
+              "description": "Git branch required for coding tasks; the service checks out its latest remote commit."
             },
             "tag": {
               "type": "string",
               "minLength": 1,
-              "description": "Git tag required for coding tasks; the task workspace is checked out at this tag."
+              "description": "Tag value required as task metadata. It does not affect which code revision is checked out."
             },
             "instruction": {
               "type": "string",
@@ -85,6 +87,7 @@
       ]
     },
     "CodingRequirements": {
+      "title": "Coding Request Requirements",
       "type": "object",
       "required": ["branch", "tag"],
       "anyOf": [
@@ -93,7 +96,58 @@
       ],
       "description": "Coding requires both branch and tag, and either repository or repo_url."
     },
+    "CodingAgentResponsePartData": {
+      "title": "Coding Agent Response Part Data",
+      "type": "object",
+      "description": "响应模型：定义服务端返回给客户端的结构化事件，仅用于响应中的 CodingAgentResponseMessagePart.data。字段名以 Codex SDK 提供的数据为准；SDK 未提供的字段可以省略。",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "MESSAGE",
+            "TOOL_EXECUTION_START",
+            "TOOL_EXECUTION_END"
+          ],
+          "description": "Event kind: assistant message or tool execution lifecycle event."
+        },
+        "text": {
+          "type": "string",
+          "description": "Assistant response text; used for MESSAGE events."
+        },
+        "toolCallId": {
+          "type": "string",
+          "description": "Identifier of the tool call, when supplied by the SDK."
+        },
+        "toolName": {
+          "type": "string",
+          "description": "Tool name, when supplied by the SDK."
+        },
+        "arguments": {
+          "$ref": "./a2a.json#/$defs/Value",
+          "description": "Tool arguments, commonly present on TOOL_EXECUTION_START."
+        },
+        "result": {
+          "$ref": "./a2a.json#/$defs/Value",
+          "description": "Tool result, when supplied by the SDK."
+        },
+        "error": {
+          "type": "string",
+          "description": "Tool execution error, when supplied by the SDK."
+        },
+        "status": {
+          "type": "string",
+          "description": "Tool execution status, when supplied by the SDK."
+        },
+        "exitCode": {
+          "type": "integer",
+          "description": "Command exit code, when supplied by the SDK."
+        }
+      },
+      "required": ["type"]
+    },
     "CodingAgentMessagePart": {
+      "title": "Coding Agent Request Message Part (Deprecated Alias)",
+      "description": "兼容旧名称的请求 part 模型。新 schema 应使用 CodingAgentRequestMessagePart。",
       "allOf": [
         {"$ref": "./a2a.json#/$defs/Part"},
         {
@@ -103,25 +157,65 @@
         }
       ]
     },
+    "CodingAgentRequestMessagePart": {
+      "title": "Coding Agent Request Message Part",
+      "description": "请求模型：客户端发送的 A2A 消息 part。其 data（如果存在）按 CodingAgentTaskPayload 解释。",
+      "allOf": [
+        {"$ref": "./a2a.json#/$defs/Part"},
+        {
+          "properties": {
+            "data": {"$ref": "#/$defs/CodingAgentTaskPayload"}
+          }
+        }
+      ]
+    },
+    "CodingAgentResponseMessagePart": {
+      "title": "Coding Agent Response Message Part",
+      "description": "响应模型：服务端返回的 A2A 消息 part。其 data（如果存在）按 CodingAgentResponsePartData 解释。",
+      "allOf": [
+        {"$ref": "./a2a.json#/$defs/Part"},
+        {
+          "properties": {
+            "data": {"$ref": "#/$defs/CodingAgentResponsePartData"}
+          }
+        }
+      ]
+    },
     "CodingAgentMessage": {
+      "title": "Coding Agent Response Message",
+      "description": "响应模型：Agent 返回给客户端的消息。请求消息请使用 A2A Message 与 CodingAgentRequestMessagePart。",
       "allOf": [
         {"$ref": "./a2a.json#/$defs/Message"},
         {
           "properties": {
             "parts": {
               "type": "array",
-              "items": {"$ref": "#/$defs/CodingAgentMessagePart"}
+              "items": {"$ref": "#/$defs/CodingAgentResponseMessagePart"}
             }
           }
         }
       ]
     },
     "CodingAgentSendMessageRequest": {
+      "title": "Coding Agent Send Message Request",
+      "description": "请求模型：客户端调用 SendMessage 时使用的请求体；其中 message.parts 为请求 part。",
       "allOf": [
         {"$ref": "./a2a.json#/$defs/SendMessageRequest"},
         {
           "properties": {
-            "message": {"$ref": "#/$defs/CodingAgentMessage"}
+            "message": {
+              "allOf": [
+                {"$ref": "./a2a.json#/$defs/Message"},
+                {
+                  "properties": {
+                    "parts": {
+                      "type": "array",
+                      "items": {"$ref": "#/$defs/CodingAgentRequestMessagePart"}
+                    }
+                  }
+                }
+              ]
+            }
           }
         }
       ]

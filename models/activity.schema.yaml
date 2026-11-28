@@ -24,6 +24,7 @@ properties:
         - $ref: '#/$defs/reasoning'
         - $ref: '#/$defs/modelSummary'
         - $ref: '#/$defs/toolExecution'
+        - $ref: '#/$defs/a2aToolExecution'
         - $ref: '#/$defs/a2aTaskActivity'
 $defs:
   a2aTaskState:
@@ -174,6 +175,37 @@ $defs:
               required: [status]
             then:
               required: [request_id]
+  a2aToolExecution:
+    description: 由 A2A 扩展 TOOL_EXECUTION_START/END 事件驱动的远端工具调用。
+    allOf:
+      - $ref: '#/$defs/baseEvent'
+      - type: object
+        required: [type, tool, correlation]
+        properties:
+          type:
+            const: a2a_tool_execution
+            description: 固定为 a2a_tool_execution，表示 A2A 远端工具调用。
+          tool:
+            type: object
+            additionalProperties: true
+            required: [name]
+            properties:
+              name:
+                type: string
+                minLength: 1
+                description: 远端工具名称。
+              server:
+                type: string
+                description: A2A 远端服务标识。
+          correlation:
+            type: object
+            additionalProperties: false
+            required: [toolCallId]
+            properties:
+              toolCallId:
+                type: string
+                minLength: 1
+                description: A2A 响应提供的远端工具调用标识。
   a2aTaskActivity:
     description: >-
       A2A 远端任务进度条目。每条 A2A_PROGRESS_EVENT 通过 AG-UI ActivityDeltaEvent

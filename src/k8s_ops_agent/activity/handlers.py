@@ -4,7 +4,13 @@ import json
 from collections.abc import Iterator
 from typing import Any, Protocol
 
-from ag_ui.core.events import BaseEvent, EventType
+from ag_ui.core.events import (
+    BaseEvent,
+    EventType,
+    ToolCallArgsEvent,
+    ToolCallResultEvent,
+    ToolCallStartEvent,
+)
 
 from k8s_ops_agent import graph_node_constants as nodes
 from k8s_ops_agent.a2a_client.graph import A2A_PROGRESS_EVENT
@@ -55,6 +61,79 @@ def _a2a_message_text(message: Any) -> str | None:
         return None
     texts = [part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)]
     return "\n".join(texts) or None
+
+
+def _a2a_tool_lifecycle(message: Any, state: ActivityState) -> Iterator[BaseEvent]:
+    """把扩展 A2A 消息中的工具生命周期映射为 AG-UI 工具事件。
+
+    参数：message 为包含 data part 的 A2A 消息；state 为当前活动状态。
+    返回值：工具活动增量及对应的 AG-UI 工具调用事件。
+    """
+    if not isinstance(message, dict) or not isinstance(message.get("parts"), list):
+        return
+
+    for part in message["parts"]:
+        if not isinstance(part, dict):
+            continue
+        data = part.get("data")
+        if not isinstance(data, dict):
+            continue
+        event_type = data.get("type")
+        if event_type == "MESSAGE":
+            text = data.get("text")
+            if not isinstance(text, str):
+                text = part.get("text")
+            if not isinstance(text, str):
+                continue
+            _, delta = state.add_activity("a2a_task", "远端消息", {
+                "correlation": {"taskId": state.content["run"]["runId"]},
+                "status": "completed",
+                "output": {"text": text},
+                "finishedAt": iso_now(),
+            })
+            yield delta
+            continue
+        if event_type not in {"TOOL_EXECUTION_START", "TOOL_EXECUTION_END"}:
+            continue
+
+        tool_call_id = data.get("toolCallId") or part.get("toolCallId") or data.get("toolName")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            tool_call_id = f"a2a-tool-{state.sequence + 1}"
+
+        if event_type == "TOOL_EXECUTION_START":
+            tool_name = data.get("toolName")
+            if not isinstance(tool_name, str) or not tool_name:
+                tool_name = "远端工具"
+            arguments = data.get("arguments")
+            arguments_text = json.dumps(arguments, ensure_ascii=False, default=str)
+            item, delta = state.add_activity("a2a_tool_execution", tool_name, {
+                "tool": {"name": tool_name, "server": "a2a-agent"},
+                "correlation": {"toolCallId": tool_call_id},
+                "input": arguments if isinstance(arguments, dict) else {"value": arguments},
+            })
+            state.active_by_tool_call[tool_call_id] = item
+            yield delta
+            yield ToolCallStartEvent(toolCallId=tool_call_id, toolCallName=tool_name)
+            if arguments is not None:
+                yield ToolCallArgsEvent(toolCallId=tool_call_id, delta=arguments_text)
+            continue
+
+        item = state.active_by_tool_call.pop(tool_call_id, None)
+        error = data.get("error")
+        result = data.get("result")
+        if item is not None:
+            yield state.update_activity(item, {
+                "status": "failed" if error else "completed",
+                "finishedAt": iso_now(),
+                "output": result,
+                "error": error,
+            })
+        content = str(error) if error else json.dumps(result, ensure_ascii=False, default=str)
+        yield ToolCallResultEvent(
+            messageId=part.get("messageId") or f"a2a-result-{tool_call_id}",
+            toolCallId=tool_call_id,
+            content=content,
+        )
 
 
 class RawEventHandler:
@@ -137,6 +216,7 @@ def _a2a_progress_activity(progress: Any, state: ActivityState) -> Iterator[Base
         "output": values["output"], "error": values["error"],
         "correlation": values["correlation"],
     })
+    yield from _a2a_tool_lifecycle(message, state)
 
 
 class CustomEventHandler:
